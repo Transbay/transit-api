@@ -14,7 +14,7 @@ import {
   type PackedSegment,
 } from './profile.js'
 import { corridorKey, type TripSchedule } from './schedule.js'
-import { DAY_TYPE_NAMES, epochSecondsFor } from './servicedate.js'
+import { DAY_TYPE_NAMES, epochSecondsFor, type DayType } from './servicedate.js'
 import type { TripUpdateRecord } from './observe.js'
 
 /**
@@ -152,6 +152,9 @@ export interface PredictionResponse {
   predictions: PredictionEntry[]
 }
 
+/** The ladder's "every day together" rung, stored beside the real day types. */
+const POOLED_DAY_TYPE = -1 as unknown as DayType
+
 function iso(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
@@ -167,6 +170,7 @@ function iso(epochSeconds: number): string {
  */
 function ladderFor(
   segments: Map<string, PackedSegment>,
+  pooled: Map<string, PackedSegment>,
   trip: TripSchedule,
   index: number,
   bucket: number,
@@ -179,11 +183,21 @@ function ladderFor(
   }
 
   const key = corridorKey({ fromStopId: from.stopId, toStopId: to.stopId, occurrence: 0 })
-  const packed = segments.get(key)
-  if (!packed) {
-    return noEstimate()
-  }
-  return estimate(fromPacked(packed, bucket, now))
+
+  const specific = segments.get(key)
+  const best = specific ? estimate(fromPacked(specific, bucket, now)) : noEstimate()
+  if (best.n > 0) return best
+
+  // Fall back to the pooled all-days rung.
+  //
+  // The ladder is supposed to walk coarse-to-fine, but the hot path loads exactly one
+  // day type's blob and so could not walk anything: on a day whose own cells are empty --
+  // a public holiday, or any day type first seen hours ago -- every segment returned no
+  // estimate and every prediction degenerated to the timetable. Meanwhile the pooled rung
+  // for the same segment held ten observations and was never asked.
+  const fallback = pooled.get(key)
+  if (!fallback) return best
+  return estimate(fromPacked(fallback, bucket, now))
 }
 
 /**
@@ -222,7 +236,10 @@ export async function predictionsFor(
     const serviceDate = scheduleIndex.status().loadedFor ?? ''
     const dayType = scheduleIndex.dayTypeFor(agency, serviceDate)
     const segments = await store.load(agency, trip.routeId, trip.directionId, dayType)
-    if (segments.size > 0) cold = false
+    // `-1` is the pooled rung: every day together. Loaded alongside rather than instead,
+    // so a day type with its own evidence still wins.
+    const pooled = await store.load(agency, trip.routeId, trip.directionId, POOLED_DAY_TYPE)
+    if (segments.size > 0 || pooled.size > 0) cold = false
 
     const bucket = Math.floor(trip.stops[target].departure / 1800) % 60
     const block = await readBlockState(agency, serviceDate, entry.vehicleId, trip.blockId)
@@ -236,7 +253,7 @@ export async function predictionsFor(
             now,
             target,
             agencyPrediction: entry.raw,
-            profileFor: (i) => ladderFor(segments, trip, i, bucket, now),
+            profileFor: (i) => ladderFor(segments, pooled, trip, i, bucket, now),
             block,
             minSamples: config.predictions.minSamples,
             holdOffset: config.profile.holdOffsetSeconds,

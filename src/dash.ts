@@ -4,6 +4,7 @@ import { buildRows, colourFor, mapColourFor, characterise, CHARACTER_LABEL } fro
 import { page, esc, jsonLiteral } from './chrome.js'
 import { loadStopTable } from './gtfs.js'
 import { mapkitConfigured } from './mapkit.js'
+import { config } from './config.js'
 import { DAY_TYPE_NAMES, BUCKETS_PER_DAY, formatGtfsTime } from './servicedate.js'
 
 /**
@@ -49,6 +50,14 @@ interface SegmentPayload {
   colour: string
   /** Higher-contrast variant, for the line on the map. */
   mapColour: string
+  /**
+   * Enough evidence to actually move a prediction.
+   *
+   * The same threshold `predict()` applies, so this is not a presentational opinion: a
+   * marked segment is one whose learned behaviour is genuinely being used, and an unmarked
+   * one is a row the model currently ignores.
+   */
+  improves: boolean
   buckets: BucketCell[]
 }
 
@@ -132,6 +141,7 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
         characterLabel: CHARACTER_LABEL[ch],
         colour: colourFor(r.mean, r.n),
         mapColour: mapColourFor(r.mean, r.n),
+        improves: r.n >= config.predictions.minSamples,
         buckets: active.map((b) => {
           const cell = r.buckets.get(b)
           return {
@@ -153,6 +163,8 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
       buckets: active.map((b) => ({ b, label: formatGtfsTime(b * 1800).slice(0, 5) })),
       segments,
       totalObservations: segments.reduce((s, x) => s + x.n, 0),
+      improving: segments.filter((s) => s.improves).length,
+      minSamples: config.predictions.minSamples,
       mapsEnabled: mapkitConfigured(),
     }
   })
@@ -186,6 +198,10 @@ td.sum { text-align:right; }
 .chip.recovery { color:#4ADE80; border-color:#4ADE8055; }
 .chip.padding { color:var(--accent-soft); border-color:#7DD3FC55; }
 .chip.congestion { color:#F87171; border-color:#F8717155; }
+tr.improves th.stop { box-shadow:inset 3px 0 0 #8B6BF0; }
+tr.improves td.sum { background:#8B6BF01a; }
+tr.improves th.stop, tr.improves td { border-bottom-color:#8B6BF033; }
+.imp { color:#A78BFA; font-weight:600; }
 #map { height:460px; border-radius:12px; overflow:hidden; background:#0f1115; }
 .mapsel { color:var(--ink-dim); font-size:.82rem; margin-top:.75rem; min-height:1.2em; }
 .mapsel b { color:var(--ink); font-weight:600; }
@@ -340,7 +356,8 @@ function heatTable(d) {
       '<td class="v" style="background:' + c.c + '" title="' +
       (c.n ? c.n + ' obs' : 'no data') + '">' +
       (c.n ? (c.mean > 0 ? '+' : '') + c.mean : '') + '</td>').join('');
-    return '<tr><th class="stop" title="' + s.from + ' → ' + s.to + '">' +
+    return '<tr' + (s.improves ? ' class="improves"' : '') + '><th class="stop" title="' +
+      s.from + ' → ' + s.to + '">' +
       s.from + ' → ' + s.to + '</th>' +
       '<td class="sum faint">' + s.sched + 's</td>' +
       '<td class="sum" style="background:' + s.colour + '">' +
@@ -451,8 +468,9 @@ async function loadRoute() {
   $('heat').innerHTML = '<div class="glass glass-pad"><p class="empty">Loading…</p></div>';
   try {
     const d = await (await fetch('/dash/api/route?' + q, {cache:'no-store'})).json();
-    $('obs').textContent = d.totalObservations.toLocaleString() + ' observations · ' +
-      d.segments.length + ' segments';
+    $('obs').innerHTML = Math.round(d.totalObservations).toLocaleString() + ' observations · ' +
+      d.segments.length + ' segments' +
+      (d.improving ? ' · <b class="imp">' + d.improving + ' improving predictions</b>' : '');
     $('heat').innerHTML = heatTable(d);
     drawMap(d);
   } catch (e) {

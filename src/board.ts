@@ -41,6 +41,15 @@ interface Departure {
   correctionSeconds?: number
   confidence?: string
   samples?: number
+  /**
+   * The same-day vehicle term, in seconds.
+   *
+   * This is the driver running consistently hot or cold today, measured as a residual
+   * against what the profile expected rather than against the timetable -- so a bus on a
+   * genuinely slow corridor is not mistaken for a slow driver. Surfaced because it is the
+   * part of a correction a reader can sanity-check from the platform.
+   */
+  blockSeconds?: number
 }
 
 function str(v: unknown): string {
@@ -191,6 +200,8 @@ async function build(
       d.correctionSeconds = delta
       d.confidence = p.confidence
       d.samples = p.evidence?.samples
+      const blk = Math.round(p.basis?.block ?? 0)
+      if (Math.abs(blk) >= 15) d.blockSeconds = blk
       corrected++
     }
   } catch {
@@ -362,6 +373,9 @@ function draw() {
     if (learned) {
       const dv = Math.round(x.correctionSeconds / 60);
       meta.push((dv > 0 ? '+' : '') + dv + ' min vs agency' + (x.samples ? ' · n=' + x.samples : ''));
+      if (x.blockSeconds) {
+        meta.push('this vehicle running ' + (x.blockSeconds < 0 ? Math.abs(x.blockSeconds) + 's early' : x.blockSeconds + 's late') + ' today');
+      }
     } else if (x.delaySeconds && Math.abs(x.delaySeconds) >= 60) {
       meta.push((x.delaySeconds > 0 ? '+' : '') + Math.round(x.delaySeconds / 60) + ' min');
     }
