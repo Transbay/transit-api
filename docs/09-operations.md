@@ -68,8 +68,8 @@ Do not set `PORT` — Railway injects it. Root Directory is the repo root; the o
 
 A cron service on the same repo, `npm run static`, once a day in the small hours.
 
-**It is separate for a concrete reason.** Parsing 2.4 million stop times out of a 300 MB
-archive peaks at a few hundred megabytes and spends twenty seconds in garbage collection.
+**It is separate for a concrete reason.** Parsing 1.6 million stop times out of a 300 MB
+archive takes nine seconds and peaks at a few hundred megabytes of short-lived allocation.
 Inside the API process that shows up as skipped poll cycles at three in the morning — a
 strange bug to be handed six weeks later, with nothing in the logs connecting it to a nightly
 job that appeared to succeed.
