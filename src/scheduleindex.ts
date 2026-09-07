@@ -32,6 +32,10 @@ export const scheduleIndexStats = {
   loadedAt: 0,
   reloads: 0,
   failures: 0,
+  /** Trips whose declared start_date did not explain when they were running. */
+  declaredDateOverridden: 0,
+  /** Trips no candidate service date explained at all. */
+  unexplainedTrips: 0,
 }
 
 /**
@@ -101,40 +105,45 @@ export function dayTypeFor(agency: string, day: ServiceDate) {
 /**
  * Which service day a live trip belongs to.
  *
- * Four ways, in order of how much they can be trusted:
+ * A service day is not a calendar day: the 00:25 owl bus belongs to *yesterday's* schedule,
+ * and GTFS says so by letting its stop times run past 24:00:00.
  *
- * 1. The producer said so. `start_date` on the trip descriptor is authoritative and needs
- *    no inference at all.
- * 2. The trip id is in today's index and today's calendar runs it.
- * 3. It is in yesterday's — which is the owl case, and the reason yesterday is loaded.
- * 4. Neither, so there is no schedule to deviate from and the trip is not profiled.
+ * The obvious implementation is to trust `start_date` on the trip descriptor, and that is
+ * what this did. **It is wrong, and measurably so.** Muni publishes `start_date` as the
+ * calendar date a trip is running on rather than the service date it belongs to, so every
+ * one of its after-midnight trips arrived with a date one day late — and a deviation
+ * computed against it is off by exactly 86,400 seconds. Measured on the live feed at 00:25
+ * local: 599 of 976 Muni observations were rejected as impossible, which is most of an
+ * operator's overnight service, every night.
  *
- * Getting this wrong is not subtle in its magnitude — it shifts a deviation by a whole day
- * — but it *is* subtle in its cause, and the plausibility gate in `outlier.ts` catches the
- * result rather than the reason. Which is why the reason is decided here, once.
+ * So `start_date` is a strong hint rather than gospel. The candidate that actually explains
+ * when the trip is running wins, and since the candidates are a day apart the comparison is
+ * never close: the right one is minutes or hours from the observation, the wrong one is a
+ * day. Where the producer's date *is* plausible it is preferred, because it disambiguates
+ * cases the arithmetic cannot — a trip whose first stop time is genuinely ambiguous across
+ * the repeated hour on a fall-back night, for instance.
  */
 export function resolveServiceDate(update: TripUpdateRecord, at: number): string | null {
-  if (update.startDate && /^\d{8}$/.test(update.startDate)) {
-    const d = update.startDate
-    return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
-  }
-
   const trip = index.trip(update.tripId)
-  if (!trip) return null
+  const declared =
+    update.startDate && /^\d{8}$/.test(update.startDate)
+      ? `${update.startDate.slice(0, 4)}-${update.startDate.slice(4, 6)}-${update.startDate.slice(6, 8)}`
+      : null
+
+  // Without a schedule there is nothing to check the claim against, so take it as given.
+  if (!trip) return declared
+
+  const start = update.startTime ? parseGtfsTime(update.startTime) : trip.stops[0]?.departure
+  if (start === undefined || start === null) return declared ?? localDate(at * 1000)
 
   const today = localDate(at * 1000)
-  const yesterday = shiftDate(today, -1)
-
-  // Pick the candidate whose scheduled start is closest to when this trip actually seems to
-  // be running. On any ordinary trip today wins by hours; on an owl trip at 00:40 the
-  // previous service day wins by the same margin, which is exactly the discrimination
-  // needed and the one a naive "use today" gets backwards for six hours a night.
-  const start = update.startTime ? parseGtfsTime(update.startTime) : trip.stops[0]?.departure
-  if (start === undefined || start === null) return today
+  const candidates = [declared, today, shiftDate(today, -1)].filter(
+    (d, i, all): d is string => d !== null && all.indexOf(d) === i,
+  )
 
   let best: string | null = null
   let bestGap = Number.POSITIVE_INFINITY
-  for (const day of [today, yesterday]) {
+  for (const day of candidates) {
     const gap = Math.abs(epochSecondsFor(day, start) - at)
     if (gap < bestGap) {
       bestGap = gap
@@ -142,9 +151,20 @@ export function resolveServiceDate(update: TripUpdateRecord, at: number): string
     }
   }
 
-  // Beyond about eighteen hours, neither candidate explains this trip and guessing would
-  // put a full day of error into a profile.
-  return bestGap <= 18 * 3600 ? best : null
+  // Beyond about eighteen hours, no candidate explains this trip and guessing would put a
+  // full day of error into a profile. Better to learn nothing from it.
+  if (bestGap > 18 * 3600) {
+    scheduleIndexStats.unexplainedTrips++
+    return null
+  }
+
+  if (declared !== null && best !== declared) {
+    // Worth counting rather than silently correcting: a producer that mislabels its
+    // overnight service is a fact about the feed, and if this counter is ever zero for an
+    // agency that used to have it, something changed upstream.
+    scheduleIndexStats.declaredDateOverridden++
+  }
+  return best
 }
 
 /** The scheduled epoch time for a stop, used to spot a feed echoing its own timetable. */

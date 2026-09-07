@@ -29,6 +29,7 @@ export type Rejection =
   | 'negative-dwell'
   | 'implausible-speed'
   | 'no-schedule'
+  | 'trip-start'
   | 'untrusted-tier'
   | 'anomalous-window'
   | 'held-composite'
@@ -73,15 +74,18 @@ export function admissible(d: Deviation, opts: { anomalousWindow?: boolean } = {
   if (d.dwell !== undefined && d.dwell < 0) {
     return { train: false, weight: 0, reason: 'negative-dwell' }
   }
-  if (d.segment && d.delta !== undefined) {
+  if (d.segmentKey && d.delta !== undefined) {
     const elapsed = d.scheduledRun + d.delta
     if (elapsed <= 0) {
       // Zero or negative elapsed running time means the two observations are out of order.
       return { train: false, weight: 0, reason: 'implausible-speed' }
     }
   }
-  if (!d.segment) {
-    return { train: false, weight: 0, reason: 'no-schedule' }
+  if (!d.segmentKey) {
+    // The first stop of a trip has no segment by nature, and that is not a fault. Counting
+    // it as "no schedule" made a healthy pipeline look like a broken one, which matters:
+    // the whole point of these counters is that somebody can tell the difference.
+    return { train: false, weight: 0, reason: d.tripStart ? 'trip-start' : 'no-schedule' }
   }
   return { train: true, weight: 1 }
 }

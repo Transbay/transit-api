@@ -97,21 +97,6 @@ if (!DB || !REDIS) {
       priorDev: -priorEarly,
       delta: -(earlyBy - priorEarly),
       dwell: undefined,
-      segment: {
-        agency: AGENCY,
-        routeId: ROUTE,
-        directionId: 0,
-        fromStopId: prev.stopId,
-        toStopId: stop.stopId,
-        occurrence: 0,
-        fromSeq: prev.seq,
-        toSeq: stop.seq,
-        scheduledRun: 180,
-        scheduledDwell: 0,
-        bucket: bucketOf(prev.departure),
-        fromTimepoint: false,
-        toTimepoint: false,
-      },
       segmentKey: segmentKey({
         agency: AGENCY,
         routeId: ROUTE,
@@ -120,6 +105,8 @@ if (!DB || !REDIS) {
         toStopId: stop.stopId,
         occurrence: 0,
       }),
+      corridorKey: `${prev.stopId}>${stop.stopId}`,
+      tripStart: false,
       scheduledRun: 180,
       bucket: bucketOf(stop.departure),
       dayType: DAY,
@@ -144,7 +131,10 @@ if (!DB || !REDIS) {
     // hold it. That gate is the thing that stops two replicas double-counting every cell,
     // and it would be the wrong thing to loosen for a test's convenience.
     learner.bindLease('integration-test')
-    await redis.set('poller:leader', 'integration-test')
+    // With a TTL, and released again at the end. A lease set without one squats the key
+    // forever: point this test at a Redis that a real poller also uses and that poller
+    // stops polling permanently, silently, because the lock is doing exactly its job.
+    await redis.set('poller:leader', 'integration-test', 'EX', 300)
 
     const status = await warehouse.status()
     assert.equal(status.connected, true)
@@ -185,10 +175,15 @@ if (!DB || !REDIS) {
         batch.push(deviation(run, i, i * 40, (i - 1) * 40))
       }
     }
+    // Through the event log, deliberately -- `learnFrom(batch)` would hand the learner the
+    // same in-memory objects the poller built, and that is precisely the shortcut that hid
+    // a showstopper: `Deviation.segment` was never serialised, so in production every real
+    // observation arrived at the learner with no segment and was rejected as having no
+    // schedule. The pipeline has to be tested across the boundary it actually crosses.
     await eventlog.append(batch)
     assert.ok((await eventlog.depth()) >= batch.length)
 
-    await learner.learnFrom(batch)
+    await learner.learnerTick()
 
     const cells = await warehouse.routeProfile(AGENCY, ROUTE, 0, DAY)
     assert.ok(cells.length > 0, 'expected the learner to have written cells')
@@ -273,6 +268,10 @@ if (!DB || !REDIS) {
   })
 
   test('everything shuts down cleanly', async () => {
+    // Hand the lease back explicitly rather than waiting out its TTL.
+    if ((await redis.get('poller:leader')) === 'integration-test') {
+      await redis.del('poller:leader')
+    }
     await warehouse.close()
     await redis.quit()
   })

@@ -27,7 +27,7 @@ import {
   emptyRegression,
   type Moments,
 } from './stats.js'
-import { asRate, corridorKey } from './schedule.js'
+import { asRate } from './schedule.js'
 import { BUCKETS_PER_DAY, localDate, DayType } from './servicedate.js'
 import { updateBlock, blockKey, type BlockState } from './blockstate.js'
 
@@ -147,7 +147,7 @@ async function learn(deviations: Deviation[]): Promise<void> {
       accumulateTrip(d, false)
       continue
     }
-    if (d.delta === undefined || !d.segmentKey || !d.segment) {
+    if (d.delta === undefined || !d.segmentKey) {
       accumulateTrip(d, true)
       continue
     }
@@ -325,14 +325,14 @@ async function updatePooledCells(deviations: Deviation[]): Promise<void> {
   const plans: { table: string; keys: (string | number)[]; value: number; weight: number; at: number }[] = []
 
   for (const d of deviations) {
-    if (d.delta === undefined || !d.segment) continue
+    if (d.delta === undefined || !d.corridorKey) continue
     const rate = asRate(d.delta, d.scheduledRun)
     const weight = tierWeight(d.tier, d.sigma)
     const at = d.actualDeparture ?? Math.floor(Date.now() / 1000)
 
     plans.push({
       table: 'corridor_profile',
-      keys: [d.agency, corridorKey(d.segment), d.dayType, d.bucket],
+      keys: [d.agency, d.corridorKey, d.dayType, d.bucket],
       value: rate,
       weight,
       at,

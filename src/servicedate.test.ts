@@ -128,6 +128,23 @@ test('serviceSecondsOf inverts epochSecondsFor, DST included', () => {
   }
 })
 
+test('every day of every month round-trips', () => {
+  // The 24th of a month used to come back as day 0 -- "2026-08-00" -- because the hour
+  // field's midnight-is-24 normalisation was being applied to the day field as well. One
+  // day in thirty had no valid service date, nothing threw where the mistake was, and
+  // Postgres rejected the value hours later in an unrelated query.
+  for (let month = 1; month <= 12; month++) {
+    const days = new Date(Date.UTC(2026, month, 0)).getUTCDate()
+    for (let day = 1; day <= days; day++) {
+      const date = `2026-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+      // Local noon is unambiguous in every zone, so the calendar date must come back exact.
+      assert.equal(localDate(serviceDayStartMs(date) + 12 * 3_600_000), date, date)
+      assert.match(date, /^\d{4}-\d{2}-\d{2}$/)
+      assert.equal(shiftDate(shiftDate(date, -14), 14), date, `round trip ${date}`)
+    }
+  }
+})
+
 test('shiftDate crosses transitions without landing on a skipped hour', () => {
   assert.equal(shiftDate('2026-03-07', 1), '2026-03-08')
   assert.equal(shiftDate('2026-03-08', -1), '2026-03-07')

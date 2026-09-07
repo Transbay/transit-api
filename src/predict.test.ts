@@ -191,7 +191,7 @@ function holdCase(earlyBy: number, leftEarlyBy: number): Deviation {
     devDeparture: -leftEarlyBy,
     priorDev: -earlyBy,
     delta: earlyBy - leftEarlyBy,
-    scheduledRun: 120, bucket: 16, dayType: 2,
+    scheduledRun: 120, bucket: 16, dayType: 2, tripStart: false,
     timepoint: false, held: false, tier: 0, sigma: 12, composite: true, predictions: [],
   }
 }

@@ -114,8 +114,14 @@ function localPartsOf(epochMs: number): LocalParts {
   const out: Record<string, number> = {}
   for (const part of partsFormat.formatToParts(new Date(epochMs))) {
     if (part.type === 'literal') continue
-    // `hour12: false` still renders midnight as "24" in some ICU versions.
-    out[part.type] = part.value === '24' ? 0 : Number(part.value)
+    // `hour12: false` renders midnight as "24" in some ICU versions, so the hour -- and
+    // ONLY the hour -- is normalised.
+    //
+    // Applying that to every field was a real bug, and an ugly one: the 24th of a month
+    // became day 0, so `localDate` returned "2026-08-00" and one day in every thirty had
+    // no valid service date at all. Nothing threw at the point of the mistake; Postgres
+    // rejected the date hours later, in a query that had nothing to do with it.
+    out[part.type] = part.type === 'hour' && part.value === '24' ? 0 : Number(part.value)
   }
   return {
     year: out.year,

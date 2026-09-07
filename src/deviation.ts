@@ -1,9 +1,9 @@
 import { Tier, type StopEvent, type PredictionSample } from './observe.js'
 import {
   ScheduleIndex,
+  corridorKey,
   holdsAt,
   segmentKey,
-  type Segment,
   type TripSchedule,
 } from './schedule.js'
 import { epochSecondsFor, bucketOf, dayTypeOf, DayType } from './servicedate.js'
@@ -57,8 +57,21 @@ export interface Deviation {
   /** Observed dwell, only where the tier can see both ends of it. */
   dwell?: number
 
-  segment?: Segment
+  /**
+   * The segment this observation measured, as two keys rather than as the object.
+   *
+   * Deliberately flat. A `Deviation` crosses a Redis stream between the poller and the
+   * learner, and a nested object is exactly the kind of thing that gets dropped by a wire
+   * format and then quietly changes behaviour on the far side -- which is what happened:
+   * the learner rejected every real observation as having no schedule, because the segment
+   * it needed had never been serialised. Absent means "this stop began a trip, or we have
+   * no schedule for it", and both are checkable from these two strings alone.
+   */
   segmentKey?: string
+  /** The same hop stripped of route and direction, for pooling across routes. */
+  corridorKey?: string
+  /** True when this was the first stop of its trip, so there is no segment by nature. */
+  tripStart: boolean
   scheduledRun: number
   bucket: number
   dayType: DayType
@@ -203,8 +216,9 @@ export class DeviationTracker {
         actualArrival !== undefined && !event.composite
           ? Math.max(0, actualDeparture - actualArrival)
           : undefined,
-      segment,
       segmentKey: segment ? segmentKey(segment) : undefined,
+      corridorKey: segment ? corridorKey(segment) : undefined,
+      tripStart: stop.seq === trip.stops[0]?.seq,
       scheduledRun: segment?.scheduledRun ?? 0,
       bucket: bucketOf(stop.departure),
       dayType: dayTypeOf(event.serviceDate),
@@ -378,4 +392,126 @@ export function applyHold(
  */
 export function startDeviation(d: Deviation, trip: TripSchedule): number | null {
   return d.seq === trip.stops[0]?.seq ? d.devDeparture : null
+}
+
+// ---------------------------------------------------------------------------
+// The wire format
+// ---------------------------------------------------------------------------
+
+/**
+ * Short keys, because this is the highest-volume thing in the system.
+ *
+ * A quarter of a million entries a day at forty bytes of key names apiece is ten megabytes
+ * a day of field names — in a capped stream, that is entries evicted for nothing.
+ *
+ * It lives here rather than in `eventlog.ts` for a reason that turned out to matter: this is
+ * pure logic about the shape of a `Deviation`, and putting it beside the Redis client meant
+ * it could not be tested without booting config and a connection. It went untested, and a
+ * field it silently failed to serialise cost the learner every observation it was ever
+ * given.
+ */
+export interface Wire {
+  a: string
+  t: string
+  r: string
+  di: number
+  p: string
+  b: string
+  v?: string
+  sd: string
+  s: string
+  q: number
+  sa: number
+  sp: number
+  aa?: number
+  ap: number
+  da?: number
+  dp: number
+  pd?: number
+  dl?: number
+  dw?: number
+  sk?: string
+  ck?: string
+  ts: number
+  sr: number
+  bk: number
+  dt: number
+  tp: number
+  hd: number
+  ti: number
+  sg: number
+  co: number
+  pr: [number, number][]
+}
+
+export function encodeDeviation(d: Deviation): Wire {
+  return {
+    a: d.agency,
+    t: d.tripId,
+    r: d.routeId,
+    di: d.directionId,
+    p: d.patternId,
+    b: d.blockId,
+    v: d.vehicleId,
+    sd: d.serviceDate,
+    s: d.stopId,
+    q: d.seq,
+    sa: d.scheduledArrival,
+    sp: d.scheduledDeparture,
+    aa: d.actualArrival,
+    ap: d.actualDeparture ?? 0,
+    da: d.devArrival,
+    dp: d.devDeparture,
+    pd: d.priorDev,
+    dl: d.delta,
+    dw: d.dwell,
+    sk: d.segmentKey,
+    ck: d.corridorKey,
+    ts: d.tripStart ? 1 : 0,
+    sr: d.scheduledRun,
+    bk: d.bucket,
+    dt: d.dayType,
+    tp: d.timepoint ? 1 : 0,
+    hd: d.held ? 1 : 0,
+    ti: d.tier,
+    sg: d.sigma,
+    co: d.composite ? 1 : 0,
+    pr: d.predictions.map((p) => [p.horizon, p.predicted]),
+  }
+}
+
+export function decodeDeviation(w: Wire): Deviation {
+  return {
+    agency: w.a,
+    tripId: w.t,
+    routeId: w.r,
+    directionId: w.di,
+    patternId: w.p,
+    blockId: w.b,
+    vehicleId: w.v,
+    serviceDate: w.sd,
+    stopId: w.s,
+    seq: w.q,
+    scheduledArrival: w.sa,
+    scheduledDeparture: w.sp,
+    actualArrival: w.aa,
+    actualDeparture: w.ap,
+    devArrival: w.da,
+    devDeparture: w.dp,
+    priorDev: w.pd,
+    delta: w.dl,
+    dwell: w.dw,
+    segmentKey: w.sk,
+    corridorKey: w.ck,
+    tripStart: w.ts === 1,
+    scheduledRun: w.sr,
+    bucket: w.bk,
+    dayType: w.dt,
+    timepoint: w.tp === 1,
+    held: w.hd === 1,
+    tier: w.ti,
+    sigma: w.sg,
+    composite: w.co === 1,
+    predictions: w.pr.map(([horizon, predicted]) => ({ horizon, predicted })),
+  }
 }

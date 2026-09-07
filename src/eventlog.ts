@@ -1,6 +1,6 @@
 import { redis } from './redis.js'
 import { config } from './config.js'
-import type { Deviation } from './deviation.js'
+import { encodeDeviation, decodeDeviation, type Deviation } from './deviation.js'
 
 /**
  * The durable hand-off between the poller and the learner.
@@ -46,7 +46,7 @@ export async function append(deviations: Deviation[]): Promise<void> {
         String(config.profile.streamMaxLen),
         '*',
         'd',
-        JSON.stringify(encode(d)),
+        JSON.stringify(encodeDeviation(d)),
       )
     }
     await pipe.exec()
@@ -85,7 +85,7 @@ export async function drain(fromId: string, max = 5000): Promise<DrainResult> {
       const raw = fields[1]
       if (!raw) continue
       try {
-        deviations.push(decode(JSON.parse(raw)))
+        deviations.push(decodeDeviation(JSON.parse(raw)))
       } catch {
         // One malformed entry must not stop the drain; the cursor has already advanced
         // past it, so it is skipped rather than retried forever.
@@ -127,115 +127,5 @@ export async function depth(): Promise<number> {
     return await redis.xlen(STREAM)
   } catch {
     return -1
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Wire format
-// ---------------------------------------------------------------------------
-
-/**
- * Short keys, because this is the highest-volume thing in the system.
- *
- * A quarter of a million entries a day at forty bytes of key names apiece is ten megabytes
- * a day of field names — in a capped stream, that is entries evicted for nothing.
- */
-interface Wire {
-  a: string
-  t: string
-  r: string
-  di: number
-  p: string
-  b: string
-  v?: string
-  sd: string
-  s: string
-  q: number
-  sa: number
-  sp: number
-  aa?: number
-  ap: number
-  da?: number
-  dp: number
-  pd?: number
-  dl?: number
-  dw?: number
-  sk?: string
-  sr: number
-  bk: number
-  dt: number
-  tp: number
-  hd: number
-  ti: number
-  sg: number
-  co: number
-  pr: [number, number][]
-}
-
-function encode(d: Deviation): Wire {
-  return {
-    a: d.agency,
-    t: d.tripId,
-    r: d.routeId,
-    di: d.directionId,
-    p: d.patternId,
-    b: d.blockId,
-    v: d.vehicleId,
-    sd: d.serviceDate,
-    s: d.stopId,
-    q: d.seq,
-    sa: d.scheduledArrival,
-    sp: d.scheduledDeparture,
-    aa: d.actualArrival,
-    ap: d.actualDeparture ?? 0,
-    da: d.devArrival,
-    dp: d.devDeparture,
-    pd: d.priorDev,
-    dl: d.delta,
-    dw: d.dwell,
-    sk: d.segmentKey,
-    sr: d.scheduledRun,
-    bk: d.bucket,
-    dt: d.dayType,
-    tp: d.timepoint ? 1 : 0,
-    hd: d.held ? 1 : 0,
-    ti: d.tier,
-    sg: d.sigma,
-    co: d.composite ? 1 : 0,
-    pr: d.predictions.map((p) => [p.horizon, p.predicted]),
-  }
-}
-
-function decode(w: Wire): Deviation {
-  return {
-    agency: w.a,
-    tripId: w.t,
-    routeId: w.r,
-    directionId: w.di,
-    patternId: w.p,
-    blockId: w.b,
-    vehicleId: w.v,
-    serviceDate: w.sd,
-    stopId: w.s,
-    seq: w.q,
-    scheduledArrival: w.sa,
-    scheduledDeparture: w.sp,
-    actualArrival: w.aa,
-    actualDeparture: w.ap,
-    devArrival: w.da,
-    devDeparture: w.dp,
-    priorDev: w.pd,
-    delta: w.dl,
-    dwell: w.dw,
-    segmentKey: w.sk,
-    scheduledRun: w.sr,
-    bucket: w.bk,
-    dayType: w.dt,
-    timepoint: w.tp === 1,
-    held: w.hd === 1,
-    tier: w.ti,
-    sigma: w.sg,
-    composite: w.co === 1,
-    predictions: w.pr.map(([horizon, predicted]) => ({ horizon, predicted })),
   }
 }
