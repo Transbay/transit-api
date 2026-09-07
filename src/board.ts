@@ -139,9 +139,26 @@ async function build(
   let corrected = 0
   try {
     const predicted = await predictionsFor(upper, stopCode)
-    const byTrip = new Map(predicted.predictions.map((p) => [p.tripId, p]))
+
+    // Joined on line and the agency's own departure time, not on the trip id.
+    //
+    // The id looked like the obvious key and silently matched nothing. SIRI's
+    // DatedVehicleJourneyRef is `shortName || stripAgencyPrefix(tripId)` (gtfsrt.ts), so it
+    // is a train number for operators that publish one and an unqualified id otherwise,
+    // while the prediction index is keyed on the agency-qualified id. Every lookup missed
+    // and the page simply showed no corrections, which is indistinguishable from having
+    // learned nothing.
+    //
+    // Line plus timestamp is stable because both sides are built from the same feed entry,
+    // so the raw time is identical rather than merely close.
+    const joinKey = (line: string, epochMs: number) =>
+      `${line.toLowerCase()}|${Math.round(epochMs / 1000)}`
+    const byKey = new Map(
+      predicted.predictions.map((p) => [joinKey(p.lineRef, Date.parse(p.raw)), p]),
+    )
+
     for (const d of departures) {
-      const p = d.tripId ? byTrip.get(d.tripId) : undefined
+      const p = byKey.get(joinKey(d.line, d.epochMs))
       if (!p) continue
 
       // `p50` rather than `predicted`, deliberately.
