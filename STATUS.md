@@ -151,6 +151,61 @@ list below.
 the lease on its next tick. Nothing in this service can affect `/v1/departures`, which is
 still served by the old code from the same Redis.
 
+## Where to actually look in the morning
+
+**The day type is not the calendar day, and this will fool you.** Two separate reasons:
+
+1. **Owl trips belong to the previous service day.** Everything collected between midnight
+   and about 5 a.m. on the 7th belongs to service date **2026-09-06, a Sunday** — so it is
+   written under `DayType.Sun = 4`. The half-hour buckets read `25:30` and `26:00`, which is
+   GTFS for 01:30 and 02:00 *on the Sunday service day*. This is `servicedate.ts` working, not
+   a bug.
+2. **2026-09-07 is Labor Day.** Muni runs Sunday service, so `warehouse.isHoliday` compares
+   today's active `service_id` set against the previous three Mondays, finds it matches none of
+   them, and classifies the day as `DayType.Hol = 5`. Today's *daytime* data therefore lands
+   under **Holiday**, not Monday.
+
+So `daytype=0` will be empty all day and that is correct. The useful URLs:
+
+```
+# tonight's owl service (Sunday service day)
+/analysis/SF/14?daytype=4
+# today's daytime service (Labor Day)
+/analysis/SF/14?daytype=5
+```
+
+The page carries `Mon · Tue-Thu · Fri · Sat · Sun · Holiday` links, so clicking through works
+too — but the default landing view is Tue-Thu, which will be empty for days.
+
+Confirmed queryable at 02:15, nine Muni owl routes with real structure:
+
+```
+SF/91  19th Ave & Holloway/SF State -> 19th Ave & Winston/Stonestown  sched 88s  mean +53s
+SF/48  22nd St Caltrain/Iowa -> Pennsylvania Ave & 23rd St            sched 62s  mean -34s
+SF/24  Cortland & Andover -> Cortland & Ellsworth                     sched 33s  mean -19s
+```
+
+Per-cell `n` still reads "not enough data", which is the honest answer: the cells exist and
+the segments are identified, but no individual half hour has the evidence to be trusted yet.
+
+**A consequence worth planning around: today is a holiday, so today is a bad day to judge the
+morning peak.** The first ordinary weekday peak is Tuesday the 8th.
+
+## 511 budget, measured
+
+Sampled over three minutes: **exactly 8.0 requests/minute, 480/hour against a 600 limit** —
+precisely the `rg`-mode steady state of two requests every fifteen seconds. The 120/hour left
+over absorbs on-demand fetches from app traffic.
+
+An earlier reading of "54 used, 9% of budget" five minutes into the hour looked like a 648/hour
+overspend. It was the fixed hourly bucket (`Math.floor(Date.now() / 3_600_000)`) having just
+rolled over, not a real rate. Worth knowing before anybody else does that arithmetic.
+
+On-demand cannot run away with the budget either: `routes.ts` gates a live fetch behind
+`config.poll.hybrid || snapshot === null`, and `hybrid` is false, so a snapshot that is merely
+stale by 511's clock is served as-is rather than triggering a fetch. Only a stop with no
+snapshot at all spends a request.
+
 ## Expect no profiles for about three weeks
 
 `PREDICTION_MODE=shadow` means corrections are computed and scored but never claimed, and
