@@ -105,7 +105,7 @@ export function page(title: string, body: string, opts: PageOptions = {}): strin
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(title)} — Transbay API</title>
+<title>${esc(title)} · Transbay API</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#0A0B0E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -127,6 +127,7 @@ export function page(title: string, body: string, opts: PageOptions = {}): strin
     </a>
     <nav class="nav">
       <a href="/dash">Profiles</a>
+      <a href="/how">How?</a>
       <a href="/health">Health</a>
       <a href="https://transbay.dev">transbay.dev</a>
     </nav>

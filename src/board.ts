@@ -302,6 +302,7 @@ const STYLE = `
 .banner { display:flex; align-items:center; gap:.55rem; padding:.6rem .85rem;
           border-radius:12px; margin-bottom:1rem; font-size:.84rem; }
 .banner.learned { border:1px solid #8B6BF055; background:#8B6BF014; color:#A78BFA; }
+.banner.learned a { color:#C4B5FD; text-decoration:underline; }
 .banner.stale { border:1px solid #7a5a20; background:#3a2a1233; color:#FBBF24; }
 .pdot { width:8px; height:8px; border-radius:50%; background:#8B6BF0; flex:none; }
 .lines { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:1rem; }
@@ -359,8 +360,9 @@ function draw() {
   }
   if (data.corrected > 0) {
     bits.push('<div class="banner learned"><span class="pdot"></span>' +
-      data.corrected + ' of ' + data.departures.length +
-      ' adjusted by learned profile</div>');
+      '<span>We are using historical data to improve countdowns. ' +
+      data.corrected + ' of ' + data.departures.length + ' adjusted. ' +
+      '<a href="/how">How?</a></span></div>');
   }
   $('banner').innerHTML = bits.join('');
 
@@ -393,7 +395,7 @@ function draw() {
     return '<div class="dep' + (learned ? ' learned' : '') + '">' +
       '<div class="line">' + (x.line || '—') + '</div>' +
       '<div><div class="dest">' + (x.destination || '—') +
-        (learned ? '<span class="tag">learned</span>' : '') + '</div>' +
+        (learned ? '<span class="tag">adjusted</span>' : '') + '</div>' +
       '<div class="meta">' + meta.join(' · ') + '</div></div>' +
       '<div class="cd ' + cls + '">' + countdown(ms) +
         (learned ? '<span class="was">agency ' + clock(x.epochMs) + '</span>' : '') +

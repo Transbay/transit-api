@@ -13,6 +13,7 @@ import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
 import { registerBoard } from './board.js'
 import { registerMapkit, mapkitStatus } from './mapkit.js'
+import { registerHow } from './how.js'
 import { predictionsFor, indexStatus } from './predictions.js'
 import { learnerStatus } from './learner.js'
 import * as warehouse from './warehouse.js'
@@ -265,6 +266,9 @@ export async function registerRoutes(app: FastifyInstance) {
   // Mints the short-lived, origin-restricted token MapKit JS needs. Optional: with no key
   // configured it reports 503 and the pages fall back to their tables.
   await registerMapkit(app)
+
+  // Linked from the purple banner on every board.
+  await registerHow(app)
 
   // A board for every operator, not just BART. Registered LAST on purpose: it owns the
   // two- and three-segment catch-alls (`/sf/15419`, `/sf/14/15419`), and while Fastify
