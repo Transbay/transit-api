@@ -68,9 +68,25 @@ const PAGE_CSS = `
 .chip.on { border-color:var(--accent); color:var(--accent); }
 .dot { width:7px; height:7px; border-radius:50%; background:#4ADE80; }
 
-select { font:inherit; font-size:.85rem; color:var(--ink); background:var(--panel-bg);
-         border:1px solid var(--edge); border-radius:9px; padding:.35rem .55rem; }
-select:focus { outline:2px solid var(--accent); outline-offset:1px; }
+/* The native control is styled away rather than replaced.
+   A hand-built listbox would have to reimplement keyboard navigation, type-ahead, the
+   focus ring and the whole mobile picker, and would get some of it wrong. Removing the
+   appearance and drawing a chevron keeps all of that and only changes the paint. */
+select {
+  font:inherit; font-size:.85rem; font-weight:500; color:var(--ink);
+  appearance:none; -webkit-appearance:none;
+  background-color:rgba(255,255,255,.04);
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239BA2AE' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right .6rem center;
+  border:1px solid var(--edge); border-radius:10px;
+  padding:.42rem 1.8rem .42rem .7rem;
+  cursor:pointer; transition:border-color .15s ease, background-color .15s ease;
+}
+select:hover { border-color:var(--edge-strong); background-color:rgba(255,255,255,.07); }
+select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+/* The open menu is drawn by the OS; these are the only two properties it honours. */
+select option { background:#15181E; color:var(--ink); }
 
 .scroll { overflow-x:auto; border:1px solid var(--edge); border-radius:var(--radius);
           background:var(--panel-bg); }

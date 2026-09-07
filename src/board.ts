@@ -279,6 +279,14 @@ const STYLE = `
 .dep { display:grid; grid-template-columns:auto 1fr auto; gap:.9rem; align-items:center;
        padding:.75rem 0; border-bottom:1px solid var(--edge); }
 .dep:last-child { border-bottom:none; }
+/* A correction is a claim about data the agency did not give us, so it is boxed rather
+   than merely tinted: the row should be obviously ours at a glance. */
+.dep.learned { border:1px solid #8B6BF066; border-radius:12px; background:#8B6BF012;
+               padding:.75rem .85rem; margin:.35rem 0; }
+.dep.learned + .dep { border-top:none; }
+.tag { display:inline-block; font-size:.62rem; letter-spacing:.09em; text-transform:uppercase;
+       font-weight:700; color:#A78BFA; border:1px solid #8B6BF055; border-radius:5px;
+       padding:0 .3rem; margin-left:.4rem; vertical-align:.08em; }
 .line { font-family:var(--font-display); font-weight:700; font-size:1rem; min-width:3.1rem;
         padding:.3rem .55rem; border-radius:10px; text-align:center;
         background:color-mix(in srgb, var(--accent) 18%, transparent);
@@ -382,8 +390,10 @@ function draw() {
     if (x.vehicle) meta.push('#' + x.vehicle);
     meta.push(clock(at));
 
-    return '<div class="dep"><div class="line">' + (x.line || '—') + '</div>' +
-      '<div><div class="dest">' + (x.destination || '—') + '</div>' +
+    return '<div class="dep' + (learned ? ' learned' : '') + '">' +
+      '<div class="line">' + (x.line || '—') + '</div>' +
+      '<div><div class="dest">' + (x.destination || '—') +
+        (learned ? '<span class="tag">learned</span>' : '') + '</div>' +
       '<div class="meta">' + meta.join(' · ') + '</div></div>' +
       '<div class="cd ' + cls + '">' + countdown(ms) +
         (learned ? '<span class="was">agency ' + clock(x.epochMs) + '</span>' : '') +
