@@ -12,7 +12,7 @@ import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
 import { registerBoard } from './board.js'
-import { registerMapkit } from './mapkit.js'
+import { registerMapkit, mapkitStatus } from './mapkit.js'
 import { predictionsFor, indexStatus } from './predictions.js'
 import { learnerStatus } from './learner.js'
 import * as warehouse from './warehouse.js'
@@ -303,6 +303,10 @@ export async function registerRoutes(app: FastifyInstance) {
           breaker: bartBreakerStatus(),
           synthesis: bartSynthesisStatus(),
         },
+        // Whether the maps will draw, and why not if they will not. The key id is
+        // truncated: it is not a secret, but a health endpoint is not the place to
+        // publish credentials-adjacent identifiers in full.
+        maps: mapkitStatus(),
         /**
          * The historical half.
          *
