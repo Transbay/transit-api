@@ -4,6 +4,7 @@ import { loadStopTable } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
 import { page, esc, jsonLiteral } from './chrome.js'
 import { predictionsFor } from './predictions.js'
+import { config } from './config.js'
 
 /**
  * A departure board for any operator, at any stop.
@@ -175,6 +176,16 @@ async function build(
       // Under half a minute is not a correction anybody can act on, and marking it purple
       // would make the indicator meaningless by making it permanent.
       if (Math.abs(delta) < 30) continue
+
+      // And it must actually have been learned from something.
+      //
+      // `predict` accepts an estimate with no evidence when the target needs no propagation
+      // (predict.ts, `prop.steps === 0`), which is defensible for an API that reports its
+      // own sample count. It is not defensible here: every such correction was landing on
+      // the scheduled second, so the board was drawing the timetable in purple and calling
+      // it learned. A marker that means "we know something" has to be backed by something.
+      const samples = p.evidence?.samples ?? 0
+      if (samples < config.predictions.minSamples) continue
 
       d.correctedMs = ms
       d.correctionSeconds = delta
