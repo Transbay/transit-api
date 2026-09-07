@@ -106,14 +106,23 @@ identifier into SQL is not to.
 
 ### Sizing
 
+Measured against the real archive rather than estimated (one build, 2026-09-06):
+
 | | |
 |---|---|
-| Stop events/day, five agencies | ~250,000–300,000 (Muni is ~4:1 over the rest combined) |
-| Trip rows/day | ~7,000 |
+| Scheduled trips, five agencies | **46,613** — SF 34,668, SM 6,082, BA 4,417, GG 1,186, CT 260 |
+| Scheduled stop times | **1,619,403** (SF alone is 1.30M, ~4:1 over the rest combined) |
+| Archive parse | **9.1 seconds**, one 511 request |
+| Service days expanded | 433 rows across a ±21-day window |
+| Trip rows/day, once observing | ~7,000 |
 | Trip rows, 90 days | ~630,000, ~340 MB with its index |
-| Schedule rows | ~48,000 per version × 3 versions |
+| Schedule rows | 46,613 per version × 3 versions kept live |
 | Profile cells at maturity | 1–4 million |
 | **Provision** | **10 GB**, expecting 2–4 used |
+
+The parse came in faster and smaller than planned for — 1.6M relevant rows rather than the
+2.4M estimated, in nine seconds rather than the tens expected. The prefilter and the
+positional reader are why; see [`10-migration.md`](10-migration.md).
 
 Retention: raw observations 90 days by daily partition, profiles indefinitely. The profile
 is the durable artefact; if the observation table were lost, three months of learning would

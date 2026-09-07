@@ -55,6 +55,19 @@ survives none of those.
 
 So: vehicle where published, block otherwise.
 
+**And two operators publish no block at all.** Measured on the real archive: Muni, SamTrans
+and Golden Gate populate `block_id` on every trip; **BART and Caltrain populate it on none**
+(0 of 4,417 and 0 of 260 respectively).
+
+For those two the same-day model keys on vehicle id alone, and the layover model has no
+scheduled layover to work with — `layoverBefore` needs a block to know which trip follows
+which. That is a real gap rather than a rounding error: terminal layover absorption is one
+of the most predictable effects in the system and it is unavailable on exactly the two
+operators whose trips are longest.
+
+Recoverable in principle by chaining trips on `vehicle_id` as they are observed, which is
+what a block *is* — noted in [`11-roadmap.md`](11-roadmap.md) rather than guessed at.
+
 ## Resets
 
 - **A gap over thirty minutes** is a new run, usually with a relief driver. The previous

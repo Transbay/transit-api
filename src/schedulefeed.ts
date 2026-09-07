@@ -7,7 +7,7 @@ import { Readable } from 'node:stream'
 import { config } from './config.js'
 import { fetchUpstreamRaw } from './upstream.js'
 import { readCSVPositional, trimTrailingBytes } from './gtfs.js'
-import { patternHash, type ScheduledStop, type TripSchedule } from './schedule.js'
+import { patternHash, timepointsAreInformative, type ScheduledStop, type TripSchedule } from './schedule.js'
 import { parseGtfsTime, shiftDate, localDate, type ServiceDate } from './servicedate.js'
 import {
   beginFeedVersion,
@@ -161,6 +161,7 @@ export async function rebuildSchedule(): Promise<ScheduleBuildResult | null> {
         blockId: raw.blockId,
         shortName: raw.shortName,
         stops: currentStops,
+        timepointsInformative: timepointsAreInformative(currentStops),
       })
       emitted.add(currentId)
     }

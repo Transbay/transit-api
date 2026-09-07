@@ -72,6 +72,19 @@ Cost: `shapes.txt` for five agencies instead of one — the prefilter already su
 plus stop-to-shape projections nightly. Memory is the constraint, which is another argument
 for it living in the schedule service.
 
+## Observed blocks for BART and Caltrain
+
+Neither publishes `block_id` — measured, 0 of 4,417 BART trips and 0 of 260 Caltrain trips.
+So neither gets the terminal-layover model, which is unfortunate given that both run long
+trips with substantial scheduled turnarounds and are exactly where layover absorption is
+most predictable.
+
+A block is, operationally, "the sequence of trips one vehicle runs". That is observable:
+chain trips by `vehicle_id` as they are seen, in service-date order, and the gap between one
+trip's last stop and the next trip's first is the layover. It needs a day of observation
+before it is usable each morning, and it needs care where a vehicle id is reused, but it
+turns an unavailable model into an available one for two of the five agencies.
+
 ## Weather
 
 Rain has a large, well-documented effect on surface transit speeds, and it is the largest

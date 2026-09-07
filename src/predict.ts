@@ -1,4 +1,4 @@
-import type { TripSchedule } from './schedule.js'
+import { holdsAt, type TripSchedule } from './schedule.js'
 import { epochSecondsFor } from './servicedate.js'
 import { Level, band, type Estimate } from './profile.js'
 import { blockProjection, type BlockState } from './blockstate.js'
@@ -158,7 +158,7 @@ export function propagate(
     // early *departure* is how a rider is told the bus is at the platform when it left
     // four minutes ago -- and it is the single most common way a delay model produces a
     // number that is confidently, repeatably wrong.
-    if (trip.stops[k].timepoint && d < holdOffset) {
+    if (holdsAt(trip, k) && d < holdOffset) {
       holdContribution += holdOffset - d
       d = holdOffset
       heldAt.push(k)
@@ -355,7 +355,7 @@ export function predict(input: PredictInput): Prediction | null {
   }
 
   // A held stop cannot be predicted before its published time.
-  if (stop.timepoint && time < scheduled + holdOffset) {
+  if (holdsAt(trip, target) && time < scheduled + holdOffset) {
     time = scheduled + holdOffset
     clamps.push('timepoint-hold')
   }

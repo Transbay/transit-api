@@ -77,6 +77,12 @@ job that appeared to succeed.
 It exits when finished, costs one 511 request, and leaves the previous schedule version live
 if anything fails.
 
+**It needs the same variables as the API**, including `APPLE_TEAM_ID`, `APP_BUNDLE_ID` and
+`JWT_SECRET`, which it never uses. `config.ts` validates everything at import and refuses to
+boot on a missing value — a deliberate property worth more than the small awkwardness of a
+job carrying credentials it does not need. On Railway, share the variables at the project
+level.
+
 ### Sizing
 
 | | |

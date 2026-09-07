@@ -207,9 +207,36 @@ four minutes ago.
 seconds after the published minute; measured across operators this sits in the +5 to +25
 second range, and assuming exactly zero makes every timepoint look very slightly late.
 
-`timepoint = 1` is also not trusted on its own — plenty of producers set it everywhere or
-nowhere. A stop is treated as holding only if the flag is set *and* the observed
-distribution has almost no mass below −60 s.
+### The flag is not the fact
+
+`timepoint = 1` is not trusted on its own, and this is not hypothetical. Measured on the
+real regional archive:
+
+| Agency | Share of stops flagged `timepoint = 1` |
+|---|---|
+| BART | **100%** |
+| Caltrain | **100%** |
+| SamTrans | 37% |
+| Golden Gate | 21% |
+| Muni | 19% |
+
+Two operators flag everything. That is not a claim that a BART train waits out its clock at
+every platform — it is a producer that does not populate the field meaningfully.
+
+Applied literally it would be badly wrong in a specific and unfalsifiable way: the hold
+clamp refuses to predict a departure before a timepoint's published time, so every BART and
+Caltrain stop would be clamped and **no train would ever be predicted ahead of schedule,
+anywhere**. From outside, that looks like a railway running punctually.
+
+So a route whose flags cover more than 90% of its stops is treated as having told us
+nothing, and no hold is modelled on it (`timepointsAreInformative` in `schedule.ts`). The
+observed split is clean — rail at 1.00, every bus operator under 0.40 — so the threshold is
+not doing delicate work; it exists so that an operator who starts flagging everything
+tomorrow degrades to "no holds" rather than to "holds everywhere".
+
+Separately, and independently, a stop is treated as *actually held* on a given trip only
+when the vehicle was materially early on arrival and left within a few seconds of its
+published time. The flag says a hold is possible; the observation says whether one happened.
 
 ## 7. The conditional response, and the trap in estimating it
 

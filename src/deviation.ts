@@ -1,6 +1,7 @@
 import { Tier, type StopEvent, type PredictionSample } from './observe.js'
 import {
   ScheduleIndex,
+  holdsAt,
   segmentKey,
   type Segment,
   type TripSchedule,
@@ -166,8 +167,9 @@ export class DeviationTracker {
 
     const segment = schedule.segments(event.tripId).find((s) => s.toSeq === event.seq)
 
+    const modelsHold = holdsAt(trip, trip.stops.indexOf(stop))
     const held =
-      stop.timepoint &&
+      modelsHold &&
       devArrival !== undefined &&
       devArrival < HOLD_EARLY_THRESHOLD &&
       devDeparture > devArrival + 30 &&
@@ -206,7 +208,7 @@ export class DeviationTracker {
       scheduledRun: segment?.scheduledRun ?? 0,
       bucket: bucketOf(stop.departure),
       dayType: dayTypeOf(event.serviceDate),
-      timepoint: stop.timepoint,
+      timepoint: modelsHold,
       held,
       tier: event.tier,
       sigma: event.sigma,

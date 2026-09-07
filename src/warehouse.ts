@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { config } from './config.js'
-import type { TripSchedule } from './schedule.js'
+import { timepointsAreInformative, type TripSchedule } from './schedule.js'
 import { shiftDate, localDate, type ServiceDate } from './servicedate.js'
 
 /**
@@ -21,6 +21,13 @@ import { shiftDate, localDate, type ServiceDate } from './servicedate.js'
  */
 
 const here = dirname(fileURLToPath(import.meta.url))
+
+/** Exactly `YYYY-MM-DD`, and a real date. The only shape allowed near interpolated SQL. */
+function isPlainDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false
+  const t = Date.parse(`${s}T12:00:00Z`)
+  return Number.isFinite(t)
+}
 
 let pool: pg.Pool | null = null
 let ready = false
@@ -165,15 +172,23 @@ async function migrate(): Promise<void> {
  */
 export async function rollPartitions(today: ServiceDate): Promise<void> {
   if (!available()) return
+  if (!isPlainDate(today)) {
+    console.error(`[warehouse] refusing to roll partitions for ${today}`)
+    return
+  }
 
   for (let d = -1; d <= 2; d++) {
     const day = shiftDate(today, d)
     const next = shiftDate(day, 1)
+    if (!isPlainDate(day) || !isPlainDate(next)) continue
     const name = `trip_observation_${day.replace(/-/g, '')}`
+    // Postgres does not accept bind parameters in DDL, so these are interpolated -- which
+    // is only acceptable because `isPlainDate` has just proved they are `YYYY-MM-DD` and
+    // nothing else. They come from our own date arithmetic, never from a request, and the
+    // check is here so that stays true if a caller ever changes.
     await run(
       `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF trip_observation
-         FOR VALUES FROM ($1) TO ($2)`,
-      [day, next],
+         FOR VALUES FROM ('${day}') TO ('${next}')`,
     )
   }
 
@@ -358,6 +373,9 @@ function toTrip(r: TripRow): TripSchedule {
     blockId: r.block_id,
     shortName: r.short_name,
     stops,
+    // Derived rather than stored: it is a function of the stops on the row, and a stored
+    // copy is one more thing that can disagree with them.
+    timepointsInformative: timepointsAreInformative(stops),
   }
 }
 

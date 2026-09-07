@@ -23,7 +23,7 @@ import {
   RUN_BREAK_SECONDS,
 } from './blockstate.js'
 import { epochSecondsFor } from './servicedate.js'
-import type { TripSchedule } from './schedule.js'
+import { timepointsAreInformative, holdsAt, type TripSchedule } from './schedule.js'
 
 const DATE = '2026-09-04' // a Friday
 const T0 = epochSecondsFor(DATE, 8 * 3600)
@@ -137,6 +137,28 @@ test('an early vehicle is held at a timepoint rather than predicted still earlie
   assert.deepEqual(p.heldAt, [5])
   assert.ok(p.deviation >= 0, `a held bus does not leave early: ${p.deviation}`)
   assert.ok(p.basis.hold > 200, 'and the hold is attributed, not hidden in the profile term')
+})
+
+test('an operator that flags every stop as a timepoint is not holding everywhere', () => {
+  // Measured on the real regional feed: BART and Caltrain flag 100% of their stops, while
+  // Muni flags 19%, Golden Gate 21% and SamTrans 37%. A flag on everything is not a claim
+  // that the operator holds everywhere -- it is a producer that does not populate the field.
+  //
+  // Applied literally it would mean no BART train is ever predicted ahead of schedule
+  // anywhere, which is false and, from outside, unfalsifiable.
+  const rail = { ...trip([...Array(12).keys()]), timepointsInformative: false }
+  assert.equal(timepointsAreInformative(rail.stops), false)
+  assert.equal(holdsAt(rail, 5), false)
+
+  const p = propagate(rail, DATE, 0, 8, -240, flatProfile(0), null)
+  assert.equal(p.deviation, -240, 'a train running early stays early')
+  assert.deepEqual(p.heldAt, [])
+
+  // The same trip from an operator that flags selectively does hold.
+  const bus = trip([5])
+  assert.equal(timepointsAreInformative(bus.stops), true)
+  assert.equal(holdsAt(bus, 5), true)
+  assert.ok(propagate(bus, DATE, 0, 8, -240, flatProfile(0), null).deviation >= 0)
 })
 
 test('without a timepoint the same vehicle stays early', () => {
