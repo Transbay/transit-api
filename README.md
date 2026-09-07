@@ -1,9 +1,30 @@
-# BayTransit API
+# transitapi
 
-The server that stands between the iOS app and 511.org.
+The server that stands between the iOS app and 511.org — and, since it sees the whole
+region's predictions every fifteen seconds anyway, the thing that remembers whether those
+predictions were any good.
 
-This file explains **why each part exists and what it talks to**. Read it top to
-bottom once; after that, the section headings map one-to-one onto the files in `src/`.
+Two halves, and the rule between them matters more than either:
+
+- **The feed.** Cache the region, serve departures, never spend more than 600 requests an
+  hour. Unchanged from the server this grew out of, and deliberately so: builds that have
+  been on people's phones for months still read `/v1/departures` byte for byte.
+- **The profile.** Record what actually happened at every stop for five operators, learn
+  where each segment of each route loses and regains time by day and hour, and publish
+  corrected predictions on their own endpoint.
+
+> **The laboratory must never be able to break the factory.**
+>
+> Postgres down, profile empty, learner crashed, model disabled — `/v1/departures` is
+> unchanged in every one of those cases. Every part of the second half is wrapped the way
+> `poller.ts` already wraps BART geometry: its own try/catch, its own counters, never a
+> dependency of a response. `docs/01-architecture.md` says how that is enforced rather than
+> merely intended.
+
+This file explains **why each part exists and what it talks to**. Read it top to bottom
+once; after that, the section headings map one-to-one onto the files in `src/`. The
+`docs/` directory goes deeper on the half that is new — start with
+[`docs/00-overview.md`](docs/00-overview.md).
 
 ---
 
@@ -88,6 +109,15 @@ vehiclepositions?agency=RG   ~1,400 live vehicles
 The cost depends on neither your userbase nor how many agencies you serve. Adding an
 operator to `POLLED_AGENCIES` costs **zero** extra requests; it just stores more of a
 response we already paid for.
+
+Which is why the default is now `POLLED_AGENCIES=*`: publish every operator the regional
+feed carries, and discover the list from the feed rather than maintaining one. An operator
+joining 511 appears on its own; one leaving stops being reported as permanently stale.
+
+**One consequence, recorded rather than left to be found.** `POLL_MODE=siri` costs one
+request *per agency* per cycle. With two dozen operators that is thousands of requests an
+hour against a budget of six hundred, so the escape hatch is no longer a drop-in: it now
+means "poll a named subset". The budget guard in `poller.ts` says so in its error message.
 
 **What this replaced.** The previous design swept SIRI `StopMonitoring` once per
 agency — eight requests a cycle, which put a 60-second sweep at the edge of a ten-key
@@ -322,7 +352,10 @@ that protocol changes.
 | `GET` | `/v1/patterns?operator_id=&line_id=` | 24 h |
 | `GET` | `/v1/departures?agency=&stopcode=` | snapshot (~15 s) |
 | `GET` | `/v1/vehicles?agency=&line=` | snapshot (~15 s) |
+| `GET` | `/v1/predictions?agency=&stopcode=` | snapshot (~15 s) |
 | `GET` | `/bart/:station` (also `/:line/:station`, `/:line/:direction/:station`) | — (open) |
+| `GET` | `/analysis/:agency/:route` | — (open) |
+| `GET` | `/v1/profile/route`, `/v1/profile/scores` | — (open) |
 | `GET` | `/health` | — (open, for Railway) |
 
 `/v1/departures` returns the **SIRI envelope**, built by `gtfsrt.ts` from the regional
@@ -348,6 +381,13 @@ Reference responses (`operators`, `lines`, `stops`, `patterns`) are still passed
 through **unchanged** from 511 and still carry
 `x-cache: fresh | hit | coalesced | stale`. Snapshot responses carry `x-source:
 snapshot | live` and `x-snapshot-age` instead.
+
+`/v1/predictions` is the one endpoint that carries a corrected time, and it is a *new*
+endpoint rather than a change to `/v1/departures` on purpose. The app derives
+"is this realtime" purely from which SIRI field a time arrives in, so moving departures
+onto a model is a decision to make deliberately and with evidence — not a side effect of
+shipping one. See [`docs/05-prediction.md`](docs/05-prediction.md) for what it returns and
+[`docs/07-evaluation.md`](docs/07-evaluation.md) for what it would take to change our mind.
 
 ---
 
@@ -385,11 +425,17 @@ curl -H "Authorization: Bearer $DEV_BYPASS_TOKEN" \
 2. **Settings → Root Directory: `server`** — otherwise Railway sees the Xcode project
    and has no idea what to build.
 3. **Add the Redis plugin.** It sets `REDIS_URL` automatically.
-4. **Variables:** `FIVEELEVEN_API_KEYS` (all ten, comma-separated), `APPLE_TEAM_ID`,
+4. **Add the Postgres plugin** if you want the delay profile. It sets `DATABASE_URL`.
+   Leaving it off is a supported configuration, not a broken one: the service boots, serves
+   every endpoint, and simply learns nothing.
+5. **Add a cron service** on the same repo running `npm run static`, once a day. That is
+   the schedule build, and it is separate because parsing 2.4M stop times peaks at a few
+   hundred megabytes — inside the API process it shows up as skipped poll cycles at 3am.
+6. **Variables:** `FIVEELEVEN_API_KEYS` (all ten, comma-separated), `APPLE_TEAM_ID`,
    `APP_BUNDLE_ID`, `JWT_SECRET` (`openssl rand -base64 48`). Do *not* set `PORT` —
    Railway injects it.
-5. **Settings → Networking → Generate Domain**, then verify `/health` responds.
-6. **Add a custom domain you own** before shipping any build to TestFlight.
+7. **Settings → Networking → Generate Domain**, then verify `/health` responds.
+8. **Add a custom domain you own** before shipping any build to TestFlight.
 
 That last point is the one that bites hardest. A `*.up.railway.app` hostname compiled
 into an App Store binary is permanent — you cannot change it for users who never
@@ -424,4 +470,43 @@ Cost: the Hobby plan at $5/month covers this workload comfortably.
   unmatched. That warning means "force a static refresh", not "something is broken".
 - **`POLL_MODE=siri` is the escape hatch,** not an equal option: one request per
   agency per cycle, no vehicle positions, and 511's raw headsigns instead of the
-  simplified ones. Raise `POLL_INTERVAL_SECONDS` to 60 if you switch to it.
+  simplified ones. With `POLLED_AGENCIES=*` it is arithmetically impossible — set a named
+  subset as well as raising `POLL_INTERVAL_SECONDS` if you ever switch to it.
+- **The profile fails quietly by design,** which is its own hazard. A Postgres outage costs
+  history rather than availability and nothing a rider can see changes, so the counters on
+  `/health` under `profile` are the thing to alert on — particularly `learner.streamDepth`
+  growing (the learner is falling behind and observations are about to be dropped) and
+  `warehouse.failures`.
+
+---
+
+## 11. The delay profile
+
+The second half of this service, and the reason it stopped being called `baytransit-api`.
+
+Every fifteen seconds we see a complete prediction for the whole region, and fifteen
+seconds later we see how it moved. Recorded over months that is a map of where and when
+each line loses time and where it gets it back — which is worth having on its own, and is
+also the raw material for a better prediction than the one the agency published.
+
+Five operators only: **Muni, BART, Caltrain, SamTrans and Golden Gate Transit**. Storing a
+stop-level event for every vehicle at every stop all day is not free, and there is no
+reason to pay it for an operator nobody has asked about.
+
+**It costs zero extra 511 requests.** It learns from bytes we already pay for; the only new
+upstream cost is parsing more of the archive we already download once a day.
+
+| Where to read about it | |
+|---|---|
+| [`docs/00-overview.md`](docs/00-overview.md) | the thesis, the diagram, what is new |
+| [`docs/01-architecture.md`](docs/01-architecture.md) | modules, data flow, the lab/factory rule |
+| [`docs/02-data-model.md`](docs/02-data-model.md) | every table and Redis key, sizing, retention |
+| [`docs/03-observation.md`](docs/03-observation.md) | GTFS-RT never says when a bus left. What we do about that |
+| [`docs/04-delay-profiles.md`](docs/04-delay-profiles.md) | increments, the shrinkage ladder, censoring, outliers |
+| [`docs/05-prediction.md`](docs/05-prediction.md) | estimators, fusion, clamps, what gets published |
+| [`docs/06-block-state.md`](docs/06-block-state.md) | the same-day driver effect, layovers, bunching |
+| [`docs/07-evaluation.md`](docs/07-evaluation.md) | scoring, the promotion gate, the learning firewall |
+| [`docs/08-api.md`](docs/08-api.md) | every endpoint, old and new |
+| [`docs/09-operations.md`](docs/09-operations.md) | deploy, migrations, runbook, failure modes |
+| [`docs/10-migration.md`](docs/10-migration.md) | what came from baytransit-widgets and what changed |
+| [`docs/11-roadmap.md`](docs/11-roadmap.md) | weather, events, headway, and the ML upgrade path |
