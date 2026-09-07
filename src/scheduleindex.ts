@@ -111,7 +111,10 @@ export async function refresh(force = false): Promise<ScheduleIndex> {
     scheduleIndexStats.loadedFor = today
     scheduleIndexStats.loadedAt = loadedAt
     scheduleIndexStats.reloads++
-    if (loadedFor === today && versions !== '' && scheduleIndexStats.feedVersions !== versions) {
+    // Only a *change* counts. The first load moves this from empty to something, which is
+    // an initial load rather than a new nightly build, and counting it would put a 1 on
+    // every boot -- making a real version reload read as 2 and the counter useless.
+    if (scheduleIndexStats.feedVersions !== '' && scheduleIndexStats.feedVersions !== versions) {
       scheduleIndexStats.versionReloads++
     }
     scheduleIndexStats.feedVersions = versions
