@@ -154,11 +154,31 @@ What you want to see:
 In the logs, `[warehouse] applied 001_schedule.sql` through `004_holds.sql` on the first
 boot only.
 
-**Check which service is polling.** Whichever took the lease is doing the work; the other is
-idle and serving from the same snapshot. Both `/health` endpoints show live per-agency
-`ageSeconds` either way, and if the new one is leading, watch it for a few minutes: the
-sweep log should read `regional: ~9000 visits across ~3000 stops` every 15 seconds, and the
-per-agency stop counts on `/health` should match what the old service reported.
+### `leader: false` is expected, and it blocks learning
+
+On a first deploy the old service already holds the poller lease, so the new one reports
+`learner.leader: false` and sits idle. That is the shared-Redis safety mechanism doing its
+job — exactly one service polls, so the 511 budget cannot be double-spent.
+
+But it has a consequence worth being explicit about: **the observation pipeline only runs on
+the lease holder.** While the old service is polling, the new one will never observe and
+never learn, however long you leave it. `schedule.trips` and `learner.observations` stay at
+zero and nothing is wrong.
+
+So the handover is a deliberate step, and it comes *after* step 5:
+
+1. Run the schedule build (step 5) so there is a schedule to measure against. This does not
+   need the lease.
+2. Set `POLL_ENABLED=false` on the **old** `baytransit-widgets` service.
+3. Within about three cycles the new service takes the lease and starts polling and
+   observing. The old service keeps answering `/v1/departures` from the same Redis — now
+   written by the new code, whose departures output is byte-identical.
+
+One variable, reversible in one variable. If anything looks wrong, set it back to `true` and
+the old service retakes the lease on its next tick.
+
+Doing it in the other order is harmless but pointless: the new service would start observing
+with no schedule, `observeCycle` would bail immediately, and nothing would be collected.
 
 ## Step 5 — Create the schedule service
 

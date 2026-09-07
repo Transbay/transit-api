@@ -824,6 +824,7 @@ export async function status(): Promise<WarehouseStatus> {
 
   const r = await run<Record<string, never>>(
     `SELECT
+       (SELECT coalesce(max(version), 0) FROM schema_version) AS schema_version,
        (SELECT count(*) FROM feed_version WHERE active) AS feed_versions,
        (SELECT count(*) FROM scheduled_trip
          WHERE feed_version IN (SELECT id FROM feed_version WHERE active)) AS trips,
@@ -833,6 +834,11 @@ export async function status(): Promise<WarehouseStatus> {
   const row = (r?.rows[0] ?? {}) as Record<string, unknown>
   return {
     ...base,
+    // Read from the database, not from what this process happened to apply. `migratedTo`
+    // is only set when a migration actually runs, so after any restart it is zero even
+    // though the schema is fully present -- which reads as "no schema" at exactly the
+    // moment somebody is checking whether the schema is there.
+    schemaVersion: Number(row.schema_version ?? warehouseStats.migratedTo),
     feedVersions: Number(row.feed_versions ?? 0),
     scheduledTrips: Number(row.trips ?? 0),
     observedDays: Number(row.days ?? 0),
