@@ -160,19 +160,50 @@ still served by the old code from the same Redis.
    written under `DayType.Sun = 4`. The half-hour buckets read `25:30` and `26:00`, which is
    GTFS for 01:30 and 02:00 *on the Sunday service day*. This is `servicedate.ts` working, not
    a bug.
-2. **2026-09-07 is Labor Day.** Muni runs Sunday service, so `warehouse.isHoliday` compares
-   today's active `service_id` set against the previous three Mondays, finds it matches none of
-   them, and classifies the day as `DayType.Hol = 5`. Today's *daytime* data therefore lands
-   under **Holiday**, not Monday.
+2. **Daytime data is under Monday, `daytype=0`** — measured, not predicted.
 
-So `daytype=0` will be empty all day and that is correct. The useful URLs:
+The useful URLs:
 
 ```
-# tonight's owl service (Sunday service day)
+# last night's owl service (Sunday service day)
 /analysis/SF/14?daytype=4
-# today's daytime service (Labor Day)
-/analysis/SF/14?daytype=5
+# today's daytime service
+/analysis/SF/14?daytype=0
 ```
+
+### An open question: Labor Day was not flagged as a holiday
+
+2026-09-07 is Labor Day, and `warehouse.isHoliday` returned false for it — measured at 07:40
+by checking which day type the data actually landed in: `daytype=0` had data for 6 of 6 sample
+routes, `daytype=5` for none.
+
+I predicted the opposite in an earlier revision of this file, and was wrong. Whether that is a
+bug depends on a fact not yet checked:
+
+- **If Muni ran reduced (Sunday-style) service today**, then holiday service is being pooled
+  into the Monday profile, and every Monday cell is biased by it. `DayType.Hol` exists exactly
+  to prevent that.
+- **If Muni ran ordinary Monday service**, `isHoliday` returning false is correct and there is
+  nothing to fix.
+
+`isHoliday` compares today's active `service_id` set against the same weekday 7, 14 and 21 days
+back and calls it a holiday only if it differs from *every* one. Candidate reasons it did not
+fire, in the order worth checking:
+
+1. **The comparison days are missing from `service_day`.** It needs rows for 2026-08-31,
+   08-24 and 08-17. The static build expands ±21 days, which puts 08-17 exactly on the boundary
+   — an off-by-one there leaves too few comparison days, and `others.length === 0` returns
+   false. Check with `SELECT day, count(*) FROM service_day WHERE agency='SF' AND day IN
+   ('2026-08-17','2026-08-24','2026-08-31') GROUP BY day`.
+2. **Muni encodes the holiday inside an existing `service_id`** rather than swapping the set,
+   in which case the set-comparison approach cannot see it and the detector needs a different
+   signal (trip count, say).
+3. **Two active feed versions now aggregate together**, though this cannot explain today: the
+   holiday map is computed once at index load, and that ran at 01:34 when only version 1
+   existed.
+
+Low urgency — one contaminated Monday among many, under shrinkage and a 21-day decay half-life,
+is a modest bias — but it recurs every public holiday, so it is worth an hour in daylight.
 
 The page carries `Mon · Tue-Thu · Fri · Sat · Sun · Holiday` links, so clicking through works
 too — but the default landing view is Tue-Thu, which will be empty for days.
