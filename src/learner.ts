@@ -290,6 +290,12 @@ async function updateSegmentCells(
     }
 
     dirtyRoutes.add(`${d.agency}|${d.routeId}|${d.directionId}|${d.dayType}`)
+    // And the pooled rung, which this observation also just updated (the `[-1, -1]` pair
+    // above). Marking only the observed day type left the every-day cells accumulating in
+    // Postgres and never mirrored to Redis, so the hot path could see a day type's own
+    // evidence or nothing at all -- and on a day whose cells were hours old, nothing at
+    // all. The ladder had a rung it could never stand on.
+    dirtyRoutes.add(`${d.agency}|${d.routeId}|${d.directionId}|-1`)
   }
 
   const rows: warehouse.ProfileRow[] = []
