@@ -2,7 +2,7 @@ import { holdsAt, type TripSchedule } from './schedule.js'
 import { epochSecondsFor } from './servicedate.js'
 import { Level, band, type Estimate } from './profile.js'
 import { blockProjection, type BlockState } from './blockstate.js'
-import { DEFAULT_HOLD_OFFSET } from './deviation.js'
+import { DEFAULT_HOLD_OFFSET, shouldHold } from './deviation.js'
 
 /**
  * Turning what we have learned into a time.
@@ -154,11 +154,17 @@ export function propagate(
     minN = Math.min(minN, est.n)
     steps++
 
-    // A vehicle running early into a timepoint waits. Predicting its early arrival as an
-    // early *departure* is how a rider is told the bus is at the platform when it left
-    // four minutes ago -- and it is the single most common way a delay model produces a
+    // A vehicle running early into a stop that holds waits there. Predicting its early
+    // arrival as an early *departure* is how a rider is told the bus is at the platform
+    // when it left four minutes ago -- the single most common way a delay model produces a
     // number that is confidently, repeatably wrong.
-    if (holdsAt(trip, k) && d < holdOffset) {
+    //
+    // Which stops hold is *measured*, and only falls back to the timetable's flag while
+    // there is not enough evidence yet. Some stops on a route hold and some do not, and no
+    // flag in the feed distinguishes them: `timepoint = 1` marks a published time, not a
+    // promise that anybody waits for it.
+    const holds = shouldHold({ rate: est.holdRate, n: est.holdN }, holdsAt(trip, k))
+    if (holds && d < holdOffset) {
       holdContribution += holdOffset - d
       d = holdOffset
       heldAt.push(k)
@@ -216,6 +222,8 @@ export interface PredictInput {
   holdOffset?: number
   /** Below this many effective samples, the profile estimator is not offered at all. */
   minSamples?: number
+  /** Measured hold behaviour at the target stop itself, where the caller has it. */
+  targetHold?: { rate: number; n: number } | null
 }
 
 export interface Prediction {
@@ -354,8 +362,10 @@ export function predict(input: PredictInput): Prediction | null {
     }
   }
 
-  // A held stop cannot be predicted before its published time.
-  if (holdsAt(trip, target) && time < scheduled + holdOffset) {
+  // A held stop cannot be predicted before its published time. Same precedence: what has
+  // been observed at this stop beats what the timetable says about it.
+  const targetHolds = shouldHold(input.targetHold ?? null, holdsAt(trip, target))
+  if (targetHolds && time < scheduled + holdOffset) {
     time = scheduled + holdOffset
     clamps.push('timepoint-hold')
   }

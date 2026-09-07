@@ -200,6 +200,8 @@ function samplePacked(): PackedSegment {
     meanAll: 12,
     sdAll: 96,
     nAll: 640,
+    holdRate: 0.82,
+    holdN: 34,
     buckets,
   }
 }
@@ -214,6 +216,8 @@ test('a profile blob round-trips', () => {
   assert.equal(back.meanAll, 12)
   assert.equal(back.sdAll, 96)
   assert.equal(back.nAll, 640)
+  assert.ok(Math.abs(back.holdRate - 0.82) < 0.01, `hold rate ${back.holdRate}`)
+  assert.equal(back.holdN, 34)
   assert.deepEqual(back.buckets[16], { mean: -45, sd: 60, n: 84 })
   assert.equal(back.buckets[17], null)
 })

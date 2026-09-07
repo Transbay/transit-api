@@ -241,6 +241,37 @@ export interface Estimate {
   level: Level
   /** True when nothing but the agency fallback had anything to say. */
   fallback: boolean
+  /**
+   * Measured fraction of early arrivals that this segment's destination stop held.
+   *
+   * Zero with `holdN` of zero means "never observed", not "never holds" -- the two are very
+   * different and `shouldHold` in `deviation.ts` distinguishes them.
+   */
+  holdRate: number
+  /** Early arrivals observed at that stop. The evidence behind `holdRate`. */
+  holdN: number
+}
+
+/**
+ * The estimate for a segment nothing is known about.
+ *
+ * A named constructor rather than a literal at each call site, so that adding a field to
+ * `Estimate` cannot leave one of them quietly defaulting. The variance is deliberately
+ * enormous: this is what the fusion weights on, and an unknown segment must lose to
+ * anything at all.
+ */
+export function noEstimate(): Estimate {
+  return {
+    delta: 0,
+    slope: 0,
+    variance: 1e6,
+    spread: 1e6,
+    n: 0,
+    level: Level.Agency,
+    fallback: true,
+    holdRate: 0,
+    holdN: 0,
+  }
 }
 
 export interface LadderInput {
@@ -261,6 +292,9 @@ export interface LadderInput {
    * the aggregator ever refits.
    */
   slope?: number
+  /** Measured hold rate at the destination stop, and the evidence behind it. */
+  holdRate?: number
+  holdN?: number
 }
 
 /**
@@ -338,6 +372,8 @@ export function estimate(input: LadderInput): Estimate {
     n: leafN,
     level: bestLevel,
     fallback: !touched || bestLevel === Level.Agency,
+    holdRate: input.holdRate ?? 0,
+    holdN: input.holdN ?? 0,
   }
 }
 
@@ -421,13 +457,13 @@ export function dayTypeChain(dt: DayType): DayType[] {
  * Only what the hot path reads is here. Histograms and the full moment structures stay in
  * Postgres, where the analysis pages can afford them.
  */
-export const BLOB_VERSION = 2
+export const BLOB_VERSION = 3
 
 /** Marks a bucket with no data, distinguishable from a bucket whose mean is zero. */
 const EMPTY = -32768
 
 const PER_BUCKET = 4
-const SEGMENT_FIXED = 10
+const SEGMENT_FIXED = 12
 
 export interface PackedSegment {
   /** `fromStopId>toStopId` with an occurrence suffix where the route loops. */
@@ -439,6 +475,15 @@ export interface PackedSegment {
   /** Standard deviation of a single observation, seconds. */
   sdAll: number
   nAll: number
+  /**
+   * Measured fraction of early arrivals held at the destination stop, 0..1.
+   *
+   * Carried per segment rather than per stop because the blob is indexed by segment and a
+   * segment has exactly one destination. Two bytes: the rate is close to binary in practice
+   * and nobody needs its third decimal place.
+   */
+  holdRate: number
+  holdN: number
   /** Per-bucket mean in seconds, sd in seconds, and effective count. */
   buckets: (null | { mean: number; sd: number; n: number })[]
 }
@@ -468,6 +513,9 @@ export function packProfile(segments: PackedSegment[]): Buffer {
     fixed.writeUInt16LE(clampU16(Math.round(s.nAll)), o)
     o += 2
     fixed.writeUInt16LE(clampU16(Math.round(s.sdAll)), o)
+    o += 2
+    fixed.writeUInt8(clampU8(Math.round(s.holdRate * 255)), o)
+    fixed.writeUInt8(clampU8(Math.round(s.holdN)), o + 1)
     o += 2
 
     for (let b = 0; b < BUCKETS_PER_DAY; b++) {
@@ -519,6 +567,8 @@ export function unpackProfile(buf: Buffer): Map<string, PackedSegment> {
     const meanAll = buf.readInt16LE(o + 4)
     const nAll = buf.readUInt16LE(o + 6)
     const sdAll = buf.readUInt16LE(o + 8)
+    const holdRate = buf.readUInt8(o + 10) / 255
+    const holdN = buf.readUInt8(o + 11)
     o += SEGMENT_FIXED
 
     const buckets: PackedSegment['buckets'] = []
@@ -530,7 +580,7 @@ export function unpackProfile(buf: Buffer): Map<string, PackedSegment> {
       o += PER_BUCKET
     }
 
-    out.set(key, { key, scheduledRun, slope, meanAll, sdAll, nAll, buckets })
+    out.set(key, { key, scheduledRun, slope, meanAll, sdAll, nAll, holdRate, holdN, buckets })
   }
 
   return out
@@ -577,7 +627,14 @@ export function fromPacked(
     }
   }
 
-  return { cells, scheduledRun: packed.scheduledRun, now, slope: packed.slope }
+  return {
+    cells,
+    scheduledRun: packed.scheduledRun,
+    now,
+    slope: packed.slope,
+    holdRate: packed.holdRate,
+    holdN: packed.holdN,
+  }
 }
 
 // ---------------------------------------------------------------------------

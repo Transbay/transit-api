@@ -79,6 +79,7 @@ route_profile(agency, route_id, direction_id, day_type, bucket, n, mean, m2)
 agency_profile(agency, day_type, bucket, n, mean, m2)
 start_profile(agency, route_id, direction_id, day_type, bucket, n, mean, m2)
 prediction_error(agency, route_id, direction_id, horizon, day_type, bucket, n, mean, m2)
+stop_hold_profile(agency, route_id, direction_id, stop_id, n, mean, m2)
 tier_calibration(agency, period, n, offset_s, variance)
 model_score(day, agency, horizon, n, raw_mae, raw_median, corr_mae, corr_median,
             bias, coverage, win_rate)
@@ -100,7 +101,13 @@ authoritative copy for the duration of a tick and this is a checkpoint of it. In
 in SQL would make two learners racing each other double-count, and the resulting inflation
 of `n` has no symptom at all.
 
-The five pooled tables share one read-modify-write path (`loadMoments` / `saveMoments`)
+`stop_hold_profile` is the odd one out in meaning rather than in shape: `n` counts
+occasions a vehicle arrived early at that stop and `mean` is the fraction of those it was
+held for. A decayed mean of a 0/1 indicator is exactly a rate, which is why it fits the
+same table shape as the rest. It is not day-type-specific — whether a stop waits for an
+early vehicle is a property of the stop and the operator's practice, not of the weekday.
+
+The pooled tables share one read-modify-write path (`loadMoments` / `saveMoments`)
 against a whitelist of table and column names — the only safe way to interpolate an
 identifier into SQL is not to.
 
@@ -156,8 +163,14 @@ u16  segment count
     i16  all-time mean, seconds
     u16  all-time effective count
     u16  all-time sd, seconds
+    u8   measured hold rate at the destination stop, 0..255
+    u8   early arrivals observed there, capped at 255
     60 x { i16 mean | EMPTY, u8 count, u8 sd/4 }
 ```
+
+The hold rate rides on the segment because the blob is indexed by segment and a segment has
+exactly one destination stop. Two bytes: the rate is close to binary in practice and nobody
+needs its third decimal place.
 
 About 300 bytes per segment; ~15 KB for a fifty-segment route; on the order of 50 MB for
 everything. `EMPTY` is `-32768`, distinguishable from a bucket whose mean is genuinely zero.

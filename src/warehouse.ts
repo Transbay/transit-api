@@ -866,6 +866,7 @@ const MOMENT_TABLES: Record<string, string[]> = {
   agency_profile: ['agency', 'day_type', 'bucket'],
   start_profile: ['agency', 'route_id', 'direction_id', 'day_type', 'bucket'],
   prediction_error: ['agency', 'route_id', 'direction_id', 'horizon', 'day_type', 'bucket'],
+  stop_hold_profile: ['agency', 'route_id', 'direction_id', 'stop_id'],
 }
 
 export interface MomentRow {
@@ -941,6 +942,30 @@ export async function saveMoments(table: string, rows: MomentRow[]): Promise<num
     if (res) written += slice.length
   }
   return written
+}
+
+/**
+ * Measured hold rates for one route, by stop.
+ *
+ * Read when a route's hot blob is rebuilt, so the prediction path gets the rate without
+ * ever asking Postgres for it.
+ */
+export async function loadHoldRates(
+  agency: string,
+  routeId: string,
+  directionId: number,
+): Promise<Map<string, { rate: number; n: number }>> {
+  const out = new Map<string, { rate: number; n: number }>()
+  if (!available()) return out
+  const r = await run<Record<string, never>>(
+    `SELECT stop_id, n, mean FROM stop_hold_profile
+      WHERE agency = $1 AND route_id = $2 AND direction_id = $3`,
+    [agency, routeId, directionId],
+  )
+  for (const row of (r?.rows ?? []) as unknown as Record<string, unknown>[]) {
+    out.set(row.stop_id as string, { rate: Number(row.mean), n: Number(row.n) })
+  }
+  return out
 }
 
 /** Every distinct route and direction with a profile, for the publish pass. */

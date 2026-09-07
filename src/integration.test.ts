@@ -44,7 +44,7 @@ if (!DB || !REDIS) {
   const { epochSecondsFor, localDate, dayTypeOf, bucketOf } = await import('./servicedate.js')
   const { Tier } = await import('./observe.js')
   const { segmentKey } = await import('./schedule.js')
-  const { estimate, fromPacked, Level } = await import('./profile.js')
+  const { estimate, fromPacked, noEstimate, Level } = await import('./profile.js')
   const { propagate } = await import('./predict.js')
 
   const DATE = localDate(Date.now())
@@ -231,7 +231,7 @@ if (!DB || !REDIS) {
         const packed = segments.get(`${from.stopId}>${to.stopId}`)
         return packed
           ? estimate(fromPacked(packed, bucketOf(from.departure), now))
-          : ({ delta: 0, slope: 0, variance: 1e6, spread: 1e6, n: 0, level: Level.Agency, fallback: true })
+          : (noEstimate())
       },
       null,
     )

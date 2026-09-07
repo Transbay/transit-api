@@ -8,6 +8,7 @@ import {
   Level,
   estimate,
   fromPacked,
+  noEstimate,
   LEVEL_NAMES,
   type Estimate,
   type PackedSegment,
@@ -174,13 +175,13 @@ function ladderFor(
   const from = trip.stops[index - 1]
   const to = trip.stops[index]
   if (!from || !to) {
-    return { delta: 0, slope: 0, variance: 1e6, spread: 1e6, n: 0, level: Level.Agency, fallback: true }
+    return noEstimate()
   }
 
   const key = corridorKey({ fromStopId: from.stopId, toStopId: to.stopId, occurrence: 0 })
   const packed = segments.get(key)
   if (!packed) {
-    return { delta: 0, slope: 0, variance: 1e6, spread: 1e6, n: 0, level: Level.Agency, fallback: true }
+    return noEstimate()
   }
   return estimate(fromPacked(packed, bucket, now))
 }

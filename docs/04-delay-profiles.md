@@ -234,9 +234,49 @@ observed split is clean — rail at 1.00, every bus operator under 0.40 — so t
 not doing delicate work; it exists so that an operator who starts flagging everything
 tomorrow degrades to "no holds" rather than to "holds everywhere".
 
-Separately, and independently, a stop is treated as *actually held* on a given trip only
-when the vehicle was materially early on arrival and left within a few seconds of its
-published time. The flag says a hold is possible; the observation says whether one happened.
+### Which stops hold is learned, not assumed
+
+The flag is a route-level proxy for a stop-level fact, and it is wrong in both directions.
+Within one operator that flags selectively, **some flagged stops hold and some do not** — a
+terminal waits out its clock, a downtown timepoint on a six-minute headway usually cannot
+afford to. And operators hold at plenty of stops nothing marks at all: layover points,
+bridge and tunnel entrances, the stop before a single-track section.
+
+So it is measured, per `(agency, route, direction, stop)`:
+
+- An **opportunity** is an occasion when a vehicle reached the stop materially early
+  (more than 60 s). A vehicle that was already on time would have left on time either way
+  and says nothing.
+- **Evidence of a hold** is that it gave up at least half a minute of that earliness and
+  left no longer materially early.
+- The hold rate is the decayed mean of that 0/1 indicator, which is why it lives in the
+  same moment table as everything else and forgets a retimed stop at the same rate.
+
+The earliness is taken from the deviation the vehicle carried *into* the stop, not from its
+own arrival time. That is deliberate and it is what makes the detector usable: most
+producers publish one time per stop, so `devArrival` is usually absent, and a detector
+needing it would only work on the two operators that need it least.
+
+`shouldHold` then prefers measurement over the flag, in both directions:
+
+| Measured | Flag | Result |
+|---|---|---|
+| rate ≥ 0.5, n ≥ 8 | either | **holds** |
+| rate < 0.5, n ≥ 8 | either | **does not hold** — even if flagged |
+| n < 8 | set | holds — the flag is all there is |
+| n < 8 | unset | does not hold |
+
+The signal is close to binary in practice — a stop that holds converts almost every early
+arrival, one that does not converts almost none — so eight observations is enough. What the
+threshold really guards against is three unusual mornings happening to agree.
+
+One trap worth naming: a rate of zero with `n = 0` means *never observed*, which is not the
+same as *never holds*. Conflating them would stop every stop being clamped the moment a
+route is first seen. `shouldHold` distinguishes them and there is a test whose only job is
+to keep it that way.
+
+The route-level `timepointsAreInformative` check still matters, because it governs the first
+few weeks of a route's life before any stop has eight early arrivals behind it.
 
 ## 7. The conditional response, and the trap in estimating it
 

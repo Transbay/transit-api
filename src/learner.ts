@@ -5,7 +5,7 @@ import * as eventlog from './eventlog.js'
 import * as store from './profilestore.js'
 import * as warehouse from './warehouse.js'
 import type { Deviation } from './deviation.js'
-import { censoring } from './deviation.js'
+import { censoring, holdOpportunity, holdEvidence } from './deviation.js'
 import { admissible, trainingWeight } from './outlier.js'
 import { tierWeight, Tier } from './observe.js'
 import {
@@ -345,6 +345,16 @@ async function updatePooledCells(deviations: Deviation[]): Promise<void> {
       at,
     })
     plans.push({
+      table: 'stop_hold_profile',
+      // Every occasion an early vehicle reached this stop, and whether it was let through.
+      // Only early arrivals count -- a vehicle that was already on time would have left on
+      // time either way and says nothing about whether the stop holds.
+      keys: [d.agency, d.routeId, d.directionId, d.stopId],
+      value: holdEvidence(d),
+      weight: holdOpportunity(d) ? 1 : 0,
+      at,
+    })
+    plans.push({
       table: 'agency_profile',
       // Three-hour periods, not half hours: the agency-wide fallback exists to always have
       // data, and dividing it sixty ways defeats that.
@@ -567,6 +577,9 @@ async function publish(): Promise<void> {
     try {
       const cells = await warehouse.loadRouteCells(agency, routeId, Number(dir), Number(dayType))
       if (cells.length === 0) continue
+      // Hold rates are not day-type-specific: whether a stop waits for an early vehicle is
+      // a property of the stop and the operator's practice, not of the day of the week.
+      const holds = await warehouse.loadHoldRates(agency, routeId, Number(dir))
 
       const bySegment = new Map<string, PackedSegment>()
       for (const c of cells) {
@@ -576,6 +589,10 @@ async function publish(): Promise<void> {
         const short = c.segmentKey.split('|').slice(3).join('|')
         let seg = bySegment.get(short)
         if (!seg) {
+          // The destination stop is what a hold applies to, and it is the second half of
+          // the segment key.
+          const toStop = (short.split('>')[1] ?? '').split('#')[0]
+          const hold = holds.get(toStop)
           seg = {
             key: short,
             scheduledRun: c.scheduledRun,
@@ -583,6 +600,8 @@ async function publish(): Promise<void> {
             meanAll: 0,
             sdAll: 0,
             nAll: 0,
+            holdRate: hold?.rate ?? 0,
+            holdN: hold?.n ?? 0,
             buckets: new Array(BUCKETS_PER_DAY).fill(null),
           }
           bySegment.set(short, seg)

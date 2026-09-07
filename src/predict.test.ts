@@ -11,7 +11,7 @@ import {
   SEGMENT_CORRELATION,
   type Estimator,
 } from './predict.js'
-import { Level, type Estimate } from './profile.js'
+import { Level, noEstimate, type Estimate } from './profile.js'
 import {
   updateBlock,
   blockProjection,
@@ -24,6 +24,13 @@ import {
 } from './blockstate.js'
 import { epochSecondsFor } from './servicedate.js'
 import { timepointsAreInformative, holdsAt, type TripSchedule } from './schedule.js'
+import {
+  holdOpportunity,
+  holdEvidence,
+  shouldHold,
+  MIN_HOLD_EVIDENCE,
+  type Deviation,
+} from './deviation.js'
 
 const DATE = '2026-09-04' // a Friday
 const T0 = epochSecondsFor(DATE, 8 * 3600)
@@ -54,7 +61,12 @@ function trip(timepoints = [0, 5, 11]): TripSchedule {
   }
 }
 
-function flatProfile(deltaPerSegment: number, n = 100, level = Level.SegmentDayBucket) {
+function flatProfile(
+  deltaPerSegment: number,
+  n = 100,
+  level = Level.SegmentDayBucket,
+  hold?: { rate: number; n: number },
+) {
   return (): Estimate => ({
     delta: deltaPerSegment,
     slope: 0,
@@ -63,6 +75,8 @@ function flatProfile(deltaPerSegment: number, n = 100, level = Level.SegmentDayB
     n,
     level,
     fallback: false,
+    holdRate: hold?.rate ?? 0,
+    holdN: hold?.n ?? 0,
   })
 }
 
@@ -115,6 +129,8 @@ test('a recovery slope makes the propagation settle instead of running away', ()
     n: 100,
     level: Level.SegmentDayBucket,
     fallback: false,
+    holdRate: 0,
+    holdN: 0,
   })
   const short = propagate(trip([]), DATE, 0, 3, 0, recovering, null)
   const long = propagate(trip([]), DATE, 0, 11, 0, recovering, null)
@@ -159,6 +175,93 @@ test('an operator that flags every stop as a timepoint is not holding everywhere
   assert.equal(timepointsAreInformative(bus.stops), true)
   assert.equal(holdsAt(bus, 5), true)
   assert.ok(propagate(bus, DATE, 0, 8, -240, flatProfile(0), null).deviation >= 0)
+})
+
+// ---------------------------------------------------------------------------
+// Which stops hold, measured rather than assumed
+// ---------------------------------------------------------------------------
+
+/** An observation of a vehicle arriving `earlyBy` seconds early and leaving `leftEarlyBy`. */
+function holdCase(earlyBy: number, leftEarlyBy: number): Deviation {
+  return {
+    agency: 'SM', tripId: 'SM:1', routeId: 'SM:172', directionId: 0, patternId: 'p',
+    blockId: 'B', serviceDate: DATE, stopId: 'SM:105', seq: 6,
+    scheduledArrival: T0, scheduledDeparture: T0,
+    actualDeparture: T0 - leftEarlyBy,
+    devDeparture: -leftEarlyBy,
+    priorDev: -earlyBy,
+    delta: earlyBy - leftEarlyBy,
+    scheduledRun: 120, bucket: 16, dayType: 2,
+    timepoint: false, held: false, tier: 0, sigma: 12, composite: true, predictions: [],
+  }
+}
+
+test('only an early arrival is an opportunity to observe holding', () => {
+  // A vehicle that was already on time would have left on time either way, so it says
+  // nothing about whether the stop holds.
+  assert.equal(holdOpportunity(holdCase(240, 0)), true)
+  assert.equal(holdOpportunity(holdCase(10, 0)), false)
+  assert.equal(holdOpportunity({ ...holdCase(240, 0), priorDev: undefined }), false)
+})
+
+test('the hold detector works without an arrival time', () => {
+  // Most producers publish one time per stop, so a detector that needed devArrival would
+  // only work on the two operators that need it least. This keys on the deviation the
+  // vehicle carried *into* the stop, which is always available.
+  const held = holdCase(240, 0)
+  assert.equal(held.devArrival, undefined)
+  assert.equal(holdEvidence(held), 1)
+})
+
+test('an early vehicle let straight through is evidence the stop does not hold', () => {
+  assert.equal(holdEvidence(holdCase(240, 235)), 0, 'arrived early, left early')
+  assert.equal(holdEvidence(holdCase(240, 200)), 0, 'gave up 40s but is still 3 min early')
+  assert.equal(holdEvidence(holdCase(240, 30)), 1, 'gave up almost all of it')
+})
+
+test('measurement beats the timetable in both directions', () => {
+  const holds = { rate: 0.9, n: 40 }
+  const doesNot = { rate: 0.05, n: 40 }
+
+  // A flagged stop that demonstrably lets vehicles through stops being clamped.
+  assert.equal(shouldHold(doesNot, true), false)
+  // And an UNFLAGGED stop that demonstrably holds starts being clamped -- which is the case
+  // the flag can never give us, and is common: terminals, layover points, bridge and tunnel
+  // entrances that no timetable marks.
+  assert.equal(shouldHold(holds, false), true)
+})
+
+test('with too little evidence the timetable is all there is', () => {
+  const thin = { rate: 1, n: MIN_HOLD_EVIDENCE - 1 }
+  assert.equal(shouldHold(thin, false), false, 'seven mornings agreeing is not a rule')
+  assert.equal(shouldHold(thin, true), true)
+  assert.equal(shouldHold(null, true), true)
+  assert.equal(shouldHold(null, false), false)
+})
+
+test('never observed is not the same as never holds', () => {
+  // The zero that means "no data" must not be read as the zero that means "lets everyone
+  // through", or every stop would stop being clamped the moment a route is first seen.
+  assert.equal(shouldHold({ rate: 0, n: 0 }, true), true)
+  assert.equal(shouldHold({ rate: 0, n: 40 }, true), false)
+})
+
+test('a stop measured as holding is clamped even where the timetable says nothing', () => {
+  const t = trip([]) // no stop flagged as a timepoint anywhere
+  const measured = flatProfile(0, 100, Level.SegmentDayBucket, { rate: 0.9, n: 40 })
+
+  const p = propagate(t, DATE, 0, 8, -240, measured, null)
+  assert.ok(p.deviation >= 0, `a stop that demonstrably holds does hold: ${p.deviation}`)
+  assert.ok(p.heldAt.length > 0)
+})
+
+test('a flagged stop measured as not holding lets an early vehicle through', () => {
+  const t = trip([5]) // stop 5 flagged
+  const measured = flatProfile(0, 100, Level.SegmentDayBucket, { rate: 0.02, n: 60 })
+
+  const p = propagate(t, DATE, 0, 8, -240, measured, null)
+  assert.equal(p.deviation, -240, 'the measurement overrides the flag')
+  assert.deepEqual(p.heldAt, [])
 })
 
 test('without a timepoint the same vehicle stays early', () => {
@@ -208,15 +311,7 @@ test('with no evidence the agency prediction is returned untouched', () => {
     target: 8,
     anchor: { index: 0, deviation: 0, at: T0 },
     agencyPrediction: raw,
-    profileFor: () => ({
-      delta: -300,
-      slope: 0,
-      variance: 1e6,
-      spread: 1e6,
-      n: 0,
-      level: Level.Agency,
-      fallback: true,
-    }),
+    profileFor: () => ({ ...noEstimate(), delta: -300 }),
   })!
   assert.equal(out.time, raw, 'a profile with nothing behind it must not move the answer')
   assert.equal(out.correctionSeconds, 0)

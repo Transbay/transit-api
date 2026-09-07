@@ -268,6 +268,85 @@ export function censoring(d: Deviation): CensoringDecision {
   return { trainRunning: null, trainHold: d.devDeparture, reason: 'held-composite' }
 }
 
+// ---------------------------------------------------------------------------
+// Detecting which stops hold
+// ---------------------------------------------------------------------------
+
+/**
+ * How early a vehicle has to be arriving for holding to be observable.
+ *
+ * A vehicle that was already on time tells us nothing about whether the stop holds: it
+ * would have left on time either way. Only an early vehicle presents the stop with a choice.
+ */
+export const HOLD_OPPORTUNITY_SECONDS = -60
+
+/**
+ * Was this an occasion on which holding could have been observed?
+ *
+ * Keyed on the deviation the vehicle *arrived* with, taken from the previous stop rather
+ * than from this stop's own arrival time. That is deliberate: most producers publish only
+ * one time per stop, so `devArrival` is usually absent, and a detector that needed it would
+ * only work on the two operators that need it least.
+ */
+export function holdOpportunity(d: Deviation): boolean {
+  return d.priorDev !== undefined && d.priorDev < HOLD_OPPORTUNITY_SECONDS
+}
+
+/**
+ * Given the opportunity, did the stop take it?
+ *
+ * An early vehicle that leaves on time was held. An early vehicle that leaves early was
+ * not — whatever the timetable claims about the stop.
+ *
+ * Returns 1 or 0 rather than a boolean because that is what the moment accumulator wants:
+ * a decayed mean of a 0/1 indicator is exactly a hold rate, and it forgets a retimed stop
+ * at the same rate everything else does.
+ */
+export function holdEvidence(d: Deviation): 0 | 1 {
+  if (!holdOpportunity(d)) return 0
+  const arrivedEarlyBy = d.priorDev!
+  const leftEarlyBy = d.devDeparture
+  // Gave up at least half a minute of its earliness, and is no longer materially early.
+  const gaveUpTime = leftEarlyBy > arrivedEarlyBy + 30
+  const noLongerEarly = leftEarlyBy > HOLD_OPPORTUNITY_SECONDS
+  return gaveUpTime && noLongerEarly ? 1 : 0
+}
+
+/**
+ * Evidence needed before a measured hold rate overrides the timetable's flag.
+ *
+ * Eight early arrivals is not many, and it does not need to be: the signal is close to
+ * binary. A stop that holds converts almost every early arrival; one that does not converts
+ * almost none. What this threshold really guards against is a stop where three unusual
+ * mornings happen to agree.
+ */
+export const MIN_HOLD_EVIDENCE = 8
+
+/** Above this measured rate, a stop is treated as holding regardless of its flag. */
+export const HOLD_RATE_THRESHOLD = 0.5
+
+/**
+ * Whether to model a hold, preferring measurement over the timetable.
+ *
+ * The order matters. With enough observations the measurement wins outright, in both
+ * directions: a flagged stop that demonstrably lets early vehicles through stops being
+ * clamped, and an *unflagged* stop that demonstrably holds starts being clamped. The second
+ * case is the one the flag can never give us, and it is common — operators hold at
+ * terminals, at layover points and at bridge and tunnel entrances that no timetable marks.
+ *
+ * Below the threshold the flag is all there is, which is why `timepointsAreInformative`
+ * still matters for the first three weeks of any route's life.
+ */
+export function shouldHold(
+  measured: { rate: number; n: number } | null,
+  flagged: boolean,
+): boolean {
+  if (measured && measured.n >= MIN_HOLD_EVIDENCE) {
+    return measured.rate >= HOLD_RATE_THRESHOLD
+  }
+  return flagged
+}
+
 /**
  * Applies a hold when predicting forward.
  *
