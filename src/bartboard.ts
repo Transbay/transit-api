@@ -330,9 +330,6 @@ function render(){
       + '</div></div>';
   }
 
-  h += '<div class="foot">Counting down by the second. Departures refresh every 15s.<br>'
-     + 'Train positions are interpolated between predicted stop times — BART publishes no '
-     + 'vehicle locations. Compare against what you actually see.</div>';
   r.innerHTML = h;
 }
 DATA.clientLoadedAt = Date.now();
@@ -357,7 +354,7 @@ setInterval(async () => {
 }, 15000);`
 
   return page(title, '<div id="root">loading…</div>', {
-    subtitle: failed ? 'BART' : 'BART · live departures and synthesized train positions',
+    subtitle: 'BART',
     headerRight:
       '<span class="pill"><span class="dot"></span>live</span>' +
       '<a class="pill" href="/dash">profiles</a>',

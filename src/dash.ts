@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import * as warehouse from './warehouse.js'
-import { buildRows, colourFor, characterise, CHARACTER_LABEL } from './analysis.js'
+import { buildRows, colourFor, mapColourFor, characterise, CHARACTER_LABEL } from './analysis.js'
 import { page, esc, jsonLiteral } from './chrome.js'
 import { loadStopTable } from './gtfs.js'
 import { mapkitConfigured } from './mapkit.js'
@@ -47,6 +47,8 @@ interface SegmentPayload {
   character: string
   characterLabel: string
   colour: string
+  /** Higher-contrast variant, for the line on the map. */
+  mapColour: string
   buckets: BucketCell[]
 }
 
@@ -129,6 +131,7 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
         character: ch,
         characterLabel: CHARACTER_LABEL[ch],
         colour: colourFor(r.mean, r.n),
+        mapColour: mapColourFor(r.mean, r.n),
         buckets: active.map((b) => {
           const cell = r.buckets.get(b)
           return {
@@ -146,7 +149,7 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
       routeId: qualified,
       direction,
       dayType,
-      dayTypeName: DAY_TYPE_NAMES[dayType] ?? String(dayType),
+      dayTypeName: dayType < 0 ? 'All days' : (DAY_TYPE_NAMES[dayType] ?? String(dayType)),
       buckets: active.map((b) => ({ b, label: formatGtfsTime(b * 1800).slice(0, 5) })),
       segments,
       totalObservations: segments.reduce((s, x) => s + x.n, 0),
@@ -165,12 +168,11 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const STYLE = `
-.stack { display:grid; gap:1rem; }
 .controls { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; }
 .controls label { color:var(--ink-faint); font-size:.72rem; text-transform:uppercase;
                   letter-spacing:.09em; font-weight:600; margin-right:-.25rem; }
-.tiers { display:flex; height:9px; border-radius:999px; overflow:hidden;
-         border:1px solid var(--edge); margin-top:.5rem; }
+.tiers { display:flex; height:8px; border-radius:999px; overflow:hidden;
+         border:1px solid var(--edge); margin-top:1rem; }
 .tiers i { display:block; height:100%; }
 .tierkey { display:flex; flex-wrap:wrap; gap:.75rem; margin-top:.55rem;
            color:var(--ink-faint); font-size:.72rem; }
@@ -180,16 +182,12 @@ th.stop { position:sticky; left:0; z-index:3; background:var(--panel-bg);
           max-width:340px; overflow:hidden; text-overflow:ellipsis; }
 thead th.stop { z-index:4; }
 td.v { text-align:right; min-width:2.9rem; font-size:11.5px; }
-td.sum { text-align:right; font-variant-numeric:tabular-nums; }
-.chip { font-size:10.5px; padding:1px 6px; border-radius:999px; border:1px solid var(--edge);
-        color:var(--ink-dim); }
+td.sum { text-align:right; }
 .chip.recovery { color:#4ADE80; border-color:#4ADE8055; }
 .chip.padding { color:var(--accent-soft); border-color:#7DD3FC55; }
 .chip.congestion { color:#F87171; border-color:#F8717155; }
-.chip.unknown { color:var(--ink-faint); }
 #map { height:460px; border-radius:12px; overflow:hidden; background:#0f1115; }
-.maphint { color:var(--ink-faint); font-size:.76rem; margin-top:.6rem; }
-.mapsel { color:var(--ink-dim); font-size:.82rem; margin-top:.6rem; min-height:1.2em; }
+.mapsel { color:var(--ink-dim); font-size:.82rem; margin-top:.75rem; min-height:1.2em; }
 .mapsel b { color:var(--ink); font-weight:600; }
 `
 
@@ -197,47 +195,33 @@ function renderDash(): string {
   const body = `
 <div class="stack">
 
-  <section class="panel">
+  <section class="glass glass-pad">
     <h2>System</h2>
-    <div class="cols" id="stats"><p class="muted">loading…</p></div>
+    <div class="figs" id="stats"><p class="muted">Loading…</p></div>
     <div class="tiers" id="tiers"></div>
     <div class="tierkey" id="tierkey"></div>
   </section>
 
-  <section class="panel">
+  <section class="glass glass-pad">
     <h2>Delay profile</h2>
     <div class="controls">
       <label for="agency">Agency</label><select id="agency"></select>
       <label for="route">Route</label><select id="route"></select>
       <label for="direction">Direction</label><select id="direction"></select>
       <label for="daytype">Day</label><select id="daytype"></select>
-      <span class="pill" id="obs">—</span>
+      <span class="chip" id="obs">—</span>
     </div>
-    <p class="sub" id="hint"></p>
+    <p class="muted small" id="hint"></p>
   </section>
 
-  <section class="panel" id="mapPanel" hidden>
+  <section class="glass glass-pad" id="mapPanel" hidden>
     <h2>Where it happens</h2>
     <div id="map"></div>
-    <div class="mapsel" id="mapsel">Tap a segment for its numbers.</div>
-    <p class="maphint">
-      Each hop is drawn between its two stops and coloured the same way the table is:
-      blue gains time, red loses it, and the colour fades as the evidence thins. A hop whose
-      stops have no coordinates in the static feed is in the table but not on the map.
-    </p>
+    <div class="mapsel" id="mapsel"></div>
   </section>
 
   <div id="heat"></div>
 
-  <p class="foot">
-    Every number carries the sample count behind it, and colour is desaturated by how little
-    evidence there is — a strong colour with n=2 would be the easiest lie this page could tell.
-    <b>Scheduled slack is not recovery:</b> padding gives the same seconds back to everyone and
-    shows a flat slope, whereas real recovery is conditional on being late and shows a negative
-    one. The chips say which.
-    <br>Day types are service days, not calendar days: an after-midnight trip belongs to the
-    previous day, so owl service appears under the day before, in buckets past 24:00.
-  </p>
 </div>`
 
   const script = `
@@ -247,7 +231,7 @@ let ROUTES = [], DTNAMES = DT_FALLBACK;
 
 function fmt(n) { return n === null || n === undefined ? '—' : n.toLocaleString(); }
 function stat(k, v, note, cls) {
-  return '<div class="stat"><div class="k">' + k + '</div><div class="v ' + (cls||'') + '">' +
+  return '<div class="fig"><div class="k">' + k + '</div><div class="v ' + (cls||'') + '">' +
          v + '</div>' + (note ? '<div class="n">' + note + '</div>' : '') + '</div>';
 }
 
@@ -288,7 +272,13 @@ async function loadStatus() {
   $('tierkey').innerHTML = t.map((v,i) =>
     '<span><span class="sw" style="background:' + cols[i] + '"></span><b>' + names[i] +
     '</b> ' + fmt(v) + '</span>').join('') +
-    '<span class="faint">A tiers are the vehicle reporting itself; Cu is a prediction that left the feed.</span>';
+    '';
+}
+
+// Negative day types are the ladder's pooled rungs -- every day together -- not a day of
+// the week. Left unnamed they render as "type -1", which reads as a bug.
+function dayName(t) {
+  return t < 0 ? 'All days' : (DTNAMES[t] || ('Type ' + t));
 }
 
 function opt(v, label, sel) {
@@ -320,11 +310,9 @@ function refreshPickers(keepRoute) {
   const types = [...new Set(combos.filter(c => c.d === Number(dSel.value)).map(c => c.t))].sort();
   const tSel = $('daytype');
   const tKeep = types.includes(Number(tSel.value)) ? tSel.value : types[0];
-  tSel.innerHTML = types.map(t => opt(t, DTNAMES[t] || ('type ' + t), tKeep)).join('');
+  tSel.innerHTML = types.map(t => opt(t, dayName(t), tKeep)).join('');
 
-  $('hint').textContent = types.length
-    ? 'Only day types with data are listed.'
-    : 'No cells for this route yet.';
+  $('hint').textContent = types.length ? '' : 'No data for this route yet.';
 }
 
 async function loadRoutes() {
@@ -341,7 +329,7 @@ async function loadRoutes() {
 
 function heatTable(d) {
   if (!d.segments.length) {
-    return '<div class="panel"><p class="empty">No profile for this combination yet.</p></div>';
+    return '<div class="glass glass-pad"><p class="empty">No data for this combination yet.</p></div>';
   }
   const head = '<tr><th class="stop">Segment</th><th>sched</th><th>mean</th><th>slope</th>' +
     '<th>n</th><th>character</th>' +
@@ -414,15 +402,21 @@ function drawMap(d) {
       });
     }
     theMap.removeOverlays(overlays);
-    overlays = hops.map(s => {
-      const o = new mapkit.PolylineOverlay(
-        [new mapkit.Coordinate(s.fromLat, s.fromLon),
-         new mapkit.Coordinate(s.toLat, s.toLon)],
-        { style: new mapkit.Style({ lineWidth: 7, lineCap: 'round',
-                                    strokeColor: s.colour || '#38BDF8' }) });
+    // Two passes: every casing first, then every colour. Drawn per-hop instead, one
+    // segment's casing lands on top of its neighbour's colour and the line looks dashed.
+    const coords = s => [new mapkit.Coordinate(s.fromLat, s.fromLon),
+                         new mapkit.Coordinate(s.toLat, s.toLon)];
+    const casings = hops.map(s => new mapkit.PolylineOverlay(coords(s), {
+      style: new mapkit.Style({ lineWidth: 11, lineCap: 'round',
+                                strokeColor: '#05070B', strokeOpacity: 0.85 }) }));
+    const lines = hops.map(s => {
+      const o = new mapkit.PolylineOverlay(coords(s), {
+        style: new mapkit.Style({ lineWidth: 6, lineCap: 'round',
+                                  strokeColor: s.mapColour || '#38BDF8' }) });
       o.data = s;
       return o;
     });
+    overlays = casings.concat(lines);
     theMap.addOverlays(overlays);
 
     // Frame the route rather than the region: a fixed span puts half of Muni off-screen.
@@ -454,7 +448,7 @@ async function loadRoute() {
     agency: $('agency').value, route: $('route').value,
     direction: $('direction').value || '0', daytype: $('daytype').value || '0',
   });
-  $('heat').innerHTML = '<div class="panel"><p class="empty">loading…</p></div>';
+  $('heat').innerHTML = '<div class="glass glass-pad"><p class="empty">Loading…</p></div>';
   try {
     const d = await (await fetch('/dash/api/route?' + q, {cache:'no-store'})).json();
     $('obs').textContent = d.totalObservations.toLocaleString() + ' observations · ' +
@@ -462,7 +456,7 @@ async function loadRoute() {
     $('heat').innerHTML = heatTable(d);
     drawMap(d);
   } catch (e) {
-    $('heat').innerHTML = '<div class="panel"><p class="empty">could not load this route</p></div>';
+    $('heat').innerHTML = '<div class="glass glass-pad"><p class="empty">Could not load this route.</p></div>';
   }
 }
 
@@ -477,12 +471,7 @@ setInterval(loadStatus, 15000);
 `
 
   return page('Delay profiles', body, {
-    subtitle:
-      'What every segment does to a vehicle, learned from the regional feed. ' +
-      'Shadow mode — nothing here is served to the app.',
-    headerRight:
-      '<span class="pill"><span class="dot"></span>live</span>' +
-      '<a class="pill" href="/health">/health</a>',
+    headerRight: '<span class="chip"><span class="dot"></span>Live</span>',
     style: STYLE,
     script,
     wide: true,

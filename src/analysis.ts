@@ -67,6 +67,27 @@ export const CHARACTER_LABEL: Record<SegmentCharacter, string> = {
  * is behind it. A confident-looking colour with four observations is exactly the sort of
  * thing people screenshot.
  */
+/**
+ * Colour for the same value drawn on a map.
+ *
+ * `colourFor` is tuned for a table cell, where the colour sits behind text on a known
+ * background and a faint wash still reads. On a map it does not: at low evidence the alpha
+ * falls to about 0.1 and the line disappears into the basemap entirely, which is worse than
+ * useless -- a segment that is drawn but invisible looks like a segment with no data.
+ *
+ * So evidence still fades the colour, but from 1.0 down to 0.55 rather than to nothing, and
+ * the lightness is raised for a dark basemap. Confidence is carried by the sample count on
+ * the table and in the selection line; on the map it only has to be legible.
+ */
+export function mapColourFor(mean: number, n: number): string {
+  const strength = Math.min(1, Math.abs(mean) / 90)
+  const evidence = Math.min(1, n / 30)
+  const alpha = 0.55 + 0.45 * evidence
+  const light = 52 + 12 * strength
+  const hue = mean > 0 ? 6 : 199
+  return `hsla(${hue}, 85%, ${light.toFixed(0)}%, ${alpha.toFixed(2)})`
+}
+
 export function colourFor(mean: number, n: number): string {
   const strength = Math.min(1, Math.abs(mean) / 120)
   const evidence = Math.min(1, n / 30)
