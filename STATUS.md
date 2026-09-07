@@ -41,12 +41,55 @@ and is being fed by this service.
 
 ### First measurements after the handover
 
-```
-cyc=9  ev=127  tiers=[A1:17 A2:34 B:14 C:0 Cu:62 D:0]  activeTrips=151
-dev=127  noSchedule=0
-tick=1  obs=93  admitted=25  cellsWritten=75
-rejected={implausible-speed:13, impossible-deviation:15, trip-start:2}
-```
+Three learner folds, about eight minutes apart in total:
+
+| | fold 1 | fold 2 | fold 3 |
+|---|---|---|---|
+| poll cycles | 9 | 26 | 44 |
+| events | 127 | 301 | 517 |
+| observations folded | 93 | 301 | 510 |
+| admitted | 25 (27%) | 188 (62%) | 363 (71%) |
+| cells written | 75 | 562 | 1,087 |
+| routes published | 0 | 0 | 19 |
+
+Tiers at fold 3: `[A1:21 A2:187 B:41 C:0 Cu:236 D:0]`, activeTrips 164, `lastTickMs: 141`,
+`lastError: null`. Postgres confirms it independently: `profileCells: 560+`, `observedDays: 1`,
+`failures: 0` — the cells are persisted, not merely counted in memory.
+
+Four things worth reading off that:
+
+- **`noSchedule=0` across all 517 observations.** This is the `Deviation.segmentKey`
+  serialisation bug confirmed fixed in production — before it, the learner rejected *every*
+  real observation and counted the rejection in silence.
+- **Each fold drains the whole stream.** Observations folded tracks events exactly, because
+  `drain()` takes up to 5,000 an interval and an interval accumulates about 260.
+- **The admission rate climbs, 27% → 62% → 71%**, which is the shrinkage ladder acquiring
+  enough evidence per cell to stop deferring entirely to its parent.
+- **A1+A2 = 208 of 517**, so 40% of events are direct vehicle observation rather than
+  converged predictions — on owl service. That is the answer the whole observation design
+  hung on, and it is the good one.
+
+`frozenAgencies` climbing (4 → 17 over eight minutes) is not a fault. At two in the morning
+most of the 24 polled operators publish a prediction set byte-identical to the last cycle, and
+the suppressor refuses to mint fictional passage events from it. See `docs/03-observation.md`,
+"The frozen producer".
+
+`impossible-deviation` is the largest rejection reason (44) but not a dominant one. The
+likeliest cause is documented: SamTrans publishes day-stale predictions on its late-night
+trips, roughly 24 hours in the past, and every one is correctly refused. Expect this to shrink
+once daytime service starts — and if it does not, that is worth a look.
+
+### Infrastructure headroom, measured
+
+| | used | limit |
+|---|---|---|
+| Redis | 47 MB (disk 57 MB) | 24 GB |
+| Postgres | 1.83 GB disk, 234 MB memory | 24 GB |
+| `transitapi` | 271 MB, 2.8% CPU | 24 GB |
+
+Nothing here is close to a limit. A full 200,000-entry observation stream is about 60 MB, and
+the morning peak is perhaps ten times the overnight volume; both are noise against 24 GB. Cost
+is the reason to watch these, not capacity.
 
 Three things worth reading off that:
 
@@ -74,6 +117,25 @@ curl -s https://transitapi-production.up.railway.app/health \
 
 Healthy looks like: `leader: true`, `obs` in the thousands, `admitted` a decent fraction of
 it, `cells` in the thousands, `tiers` with non-zero A1/A2, `err: null`.
+
+**The two real liveness signals are `observation.tracker.cycles` and `learner.ticks`.** Both
+must be advancing. Cycles climb about four a minute; ticks one every five minutes. Everything
+else can look odd for innocent reasons, and two of them look alarming:
+
+**`poll.agencies[].ageSeconds` is 511's clock, not ours.** `snapshot.ts` stamps the snapshot
+with `grouped.responseTimestamp` — the feed header — and only falls back to our write time if
+the producer omits it. So the number measures how old 511's data is. It read 10 s at 01:47 and
+33 s at 02:15 with the poller perfectly healthy in between. The tell that it is feed-wide
+rather than ours: every agency reports the *same* value to the second, including operators we
+barely touch. If it were our write latency it would vary per agency by write order.
+
+Corollary: **never read the maximum age across agencies.** An operator that has stopped for
+the night legitimately goes stale — BART sat at 212 s at 2 a.m. with two stops left in its
+feed, because BART was shut. Read the freshest, or read `SF`, which is 4:1 the volume of the
+other four profiled agencies combined.
+
+**`learner.lastTickMs` is the number that would warn you of a real backlog**, and it was
+**141 ms**. A fold that costs a seventh of a second cannot fall behind a 300-second interval.
 
 **Do not read `learner.streamDepth` as a backlog.** It is `XLEN` on the whole stream, capped
 at 200,000 by `PROFILE_STREAM_MAXLEN`, so it climbs toward that cap and then sits on it
