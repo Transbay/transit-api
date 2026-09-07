@@ -2,10 +2,12 @@
 
 What the 511 feed actually contains, measured rather than assumed.
 
-Two halves. The **static** half below was measured against the real regional archive on
-2026-09-06 and is complete. The **realtime** half is not yet done and is the decision gate
-for the observation design — run `node dist/forensics.js 60 30` and this file will be
-rewritten with it.
+Both halves measured. The **static** half against the real regional archive on 2026-09-06;
+the **realtime** half against the live feed overnight on 2026-09-07, by running the whole
+pipeline for an hour rather than by sampling.
+
+Between them they corrected five things the design had wrong, three of them in code that
+looked correct and passed its tests. Each correction is marked below.
 
 ---
 
