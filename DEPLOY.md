@@ -81,13 +81,18 @@ before paying for a database, skip this and come back.
 |---|---|
 | Root Directory | **leave empty** — the code is at the repo root now, not under `/server` |
 | Branch | `main` |
-| Start Command | `npm start` (from `railway.json`) |
+| Start Command | **`npm start`** — set it explicitly, see below |
 | Health Check Path | `/health` |
 | Builder | leave the default |
 
-> `railway.json` in the repo says `NIXPACKS`; your existing service is on Railpack, which
-> means the dashboard setting has been winning. Leave whatever Railway picks — Railpack
-> builds this fine. Worth deciding once and making the file agree, but not today.
+> **There is no `railway.json` any more, on purpose.** It used to carry
+> `startCommand: npm start`, `healthcheckPath: /health` and a restart policy — every one of
+> which is right for the API service and wrong for the cron service that now builds from the
+> same repository. One file cannot describe two services with opposite needs, and the failure
+> is silent in the worst direction: the cron job inherits `npm start`, boots a second API
+> server, never builds a schedule, and never exits.
+>
+> So service-specific settings live on the service. Set the start command explicitly on both.
 
 ### Variables
 
@@ -186,9 +191,15 @@ with no schedule, `observeCycle` would bail immediately, and nothing would be co
 
 | Setting | Value |
 |---|---|
-| Start Command | `npm run static` |
+| Start Command | **`npm run static`** — the single most important setting here |
 | Cron Schedule | `20 10 * * *` (03:20 Pacific — after the service day has ended) |
 | Health Check | **none.** It exits when finished |
+| Restart Policy | **never** |
+| Region | the same as Redis and Postgres. See below |
+
+If the start command is left unset, Railpack falls back to the `start` script in
+`package.json` and the cron job boots the API server instead: a second poller contending for
+the lease, no schedule ever built, and a process that does not exit. Nothing errors.
 
 It needs the **same variables**, including `APPLE_TEAM_ID`, `APP_BUNDLE_ID` and `JWT_SECRET`,
 which it never uses — `config.ts` validates everything at import and refuses to boot on a
