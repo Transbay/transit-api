@@ -36,7 +36,8 @@ export function groupTripUpdates(
   buffer: Uint8Array,
   trips: Map<string, TripInfo>,
   stops: Map<string, StopInfo>,
-  agencies: Set<string>,
+  /** Null publishes every operator the feed carries. */
+  agencies: Set<string> | null,
 ): GroupedRealtime {
   const feed = rt.FeedMessage.decode(buffer)
 
@@ -55,7 +56,7 @@ export function groupTripUpdates(
     const routeId = update.trip.routeId ?? ''
 
     const agency = agencyOf(tripId, routeId)
-    if (!agency || !agencies.has(agency)) continue
+    if (!agency || (agencies && !agencies.has(agency))) continue
 
     /** A trip in the live feed that the static table has never heard of. */
     const info = trips.get(tripId)
@@ -200,7 +201,7 @@ export function decodeVehiclePositions(
   buffer: Uint8Array,
   trips: Map<string, TripInfo>,
   stops: Map<string, StopInfo>,
-  agencies: Set<string>,
+  agencies: Set<string> | null,
 ): VehicleRecord[] {
   const feed = rt.FeedMessage.decode(buffer)
   const out: VehicleRecord[] = []
@@ -214,7 +215,7 @@ export function decodeVehiclePositions(
     const tripId = vehicle.trip?.tripId ?? ''
     const routeId = vehicle.trip?.routeId ?? ''
     const agency = agencyOf(tripId, routeId)
-    if (!agency || !agencies.has(agency)) continue
+    if (!agency || (agencies && !agencies.has(agency))) continue
 
     const info = trips.get(tripId)
     const stopId = vehicle.stopId ?? undefined

@@ -4,7 +4,7 @@ import { redis } from './redis.js'
 import { fetchUpstream, fetchUpstreamProtobuf } from './upstream.js'
 import { NoKeyAvailableError, BudgetUnavailableError } from './keypool.js'
 import { groupByStop, type SIRIResponse } from './siri.js'
-import { writeSnapshot, writeVehicles } from './snapshot.js'
+import { writeSnapshot, writeVehicles, rememberAgency } from './snapshot.js'
 import { groupTripUpdates, decodeVehiclePositions } from './gtfsrt.js'
 import {
   loadStaticGTFS,
@@ -24,11 +24,29 @@ import {
 import { enrichWithEtd } from './bartetd.js'
 import { synthesizeBartVehicles } from './bartposition.js'
 import type { VehicleRecord } from './gtfsrt.js'
+import { decodeTripUpdates, decodeVehicles, countSchedulePassthrough, mergeSurvey, surveyToJSON, type FeedSurvey } from './rtdecode.js'
+import { TripTracker } from './observe.js'
+import { DeviationTracker } from './deviation.js'
+import * as eventlog from './eventlog.js'
+import * as scheduleIndex from './scheduleindex.js'
+import { startLearner, stopLearner } from './learner.js'
+import * as warehouse from './warehouse.js'
 
 /** Keeps every agency's departures current, on a schedule of our choosing. */
 
 /** Identifies this process in the leader lock. */
 const instanceId = randomUUID()
+
+/**
+ * The learner shares this lease rather than electing separately.
+ *
+ * Two elections could land on two different instances, and two learners doing
+ * read-modify-write on the same profile cells double-count with no symptom at all -- every
+ * cell simply shrinks less than it should, everywhere, forever.
+ */
+export function pollerInstanceId(): string {
+  return instanceId
+}
 
 const LEADER_KEY = 'poller:leader'
 
@@ -38,8 +56,34 @@ let cursor = 0
 /** Guards against a slow cycle overlapping the next tick. */
 let inFlight = false
 
-function agencySet(): Set<string> {
-  return new Set(config.poll.agencies)
+/** Null means "publish every operator the regional feed carries". */
+function agencySet(): Set<string> | null {
+  return config.poll.allAgencies ? null : new Set(config.poll.agencies)
+}
+
+/** The five operators whose history is learned, which is a much shorter list. */
+function profiledSet(): Set<string> {
+  return new Set(config.profile.agencies)
+}
+
+/** Running totals of what the feed actually contains, for /health and the forensics report. */
+const survey: FeedSurvey = new Map()
+
+export function feedSurvey(): ReturnType<typeof surveyToJSON> {
+  return surveyToJSON(survey)
+}
+
+/**
+ * The observation pipeline.
+ *
+ * Deliberately built once and kept: the tracker's whole job is remembering what the feed
+ * said last cycle, so it cannot be reconstructed per tick.
+ */
+const tripTracker = new TripTracker({ profiled: profiledSet() })
+const deviationTracker = new DeviationTracker()
+
+export function observationStats() {
+  return { tracker: tripTracker.stats, deviation: deviationTracker.stats, activeTrips: tripTracker.activeTrips }
 }
 
 /** Claims (or renews) the right to poll. */
@@ -93,7 +137,8 @@ async function pollRegional(): Promise<void> {
 
   const [trips, stops] = await Promise.all([loadTripTable(), loadStopTable()])
   const agencies = agencySet()
-  const wantBart = agencies.has('BA') && bartAvailable()
+  const includes = (a: string) => agencies === null || agencies.has(a)
+  const wantBart = includes('BA') && bartAvailable()
 
   // One `allSettled`, so a BART outage is structurally identical to a
   // `vehiclepositions` outage: one rejected entry, one warning, every other feed
@@ -159,17 +204,18 @@ async function pollRegional(): Promise<void> {
         }
       }
 
-      for (const agency of agencies) {
-        const byStop = grouped.byAgency.get(agency)
-        // An agency absent from this cycle's feed keeps its previous snapshot. That
-        // is right overnight, when operators genuinely stop reporting, and it is
-        // also the safe answer if 511 drops one mid-feed.
-        if (!byStop || byStop.size === 0) continue
+      // Iterating what the feed produced rather than what configuration expects. An
+      // agency absent from this cycle keeps its previous snapshot, which is right
+      // overnight when operators genuinely stop reporting and is also the safe answer if
+      // 511 drops one mid-feed.
+      for (const [agency, byStop] of grouped.byAgency) {
+        if (byStop.size === 0) continue
         storedStops += await writeSnapshot(agency, {
           byStop,
           responseTimestamp: grouped.responseTimestamp,
           dropped: 0,
         })
+        await rememberAgency(agency)
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1)
@@ -211,7 +257,7 @@ async function pollRegional(): Promise<void> {
   // a throw in the geometry must never cost the other 23 operators their snapshot.
   if (
     config.bart.synthesizeVehicles &&
-    agencies.has('BA') &&
+    includes('BA') &&
     updates.status === 'fulfilled'
   ) {
     try {
@@ -252,6 +298,68 @@ async function pollRegional(): Promise<void> {
       console.error('[poller] vehicle store failed:', (err as Error).message)
     }
   }
+
+  // --- observation ---------------------------------------------------------
+  // Its own try/catch, exactly like BART geometry above and for the same reason: the
+  // historical system is an enhancement, and a throw in it must never cost the other
+  // twenty-three operators their snapshot. Everything below this line can be deleted and
+  // the departures feed is unchanged.
+  if (config.profile.enabled && updates.status === 'fulfilled') {
+    try {
+      await observeCycle(
+        updates.value,
+        vehicles.status === 'fulfilled' ? vehicles.value : null,
+        Math.floor(startedAt / 1000),
+      )
+    } catch (err) {
+      console.error('[poller] observation failed:', (err as Error).message)
+    }
+  }
+}
+
+/**
+ * Turns this cycle's feed into observations.
+ *
+ * Decoded a second time, from `rtdecode.ts` rather than from the SIRI translation above.
+ * That duplication is the **learning firewall** and it is worth its cost: the model trains
+ * on what the agency published, never on anything this service has shaped, filtered or
+ * corrected. A learner fed its own output drifts into agreeing with itself, and the
+ * symptom -- a model that scores beautifully and predicts badly -- is among the hardest
+ * kinds of wrong to notice.
+ */
+async function observeCycle(
+  tripBuffer: Uint8Array,
+  vehicleBuffer: Uint8Array | null,
+  at: number,
+): Promise<void> {
+  const profiled = profiledSet()
+  if (profiled.size === 0) return
+
+  const schedule = await scheduleIndex.refresh()
+  if (schedule.size === 0) return
+
+  const cycleSurvey: FeedSurvey = new Map()
+  const { updates } = decodeTripUpdates(tripBuffer, profiled, cycleSurvey)
+  const { vehicles } = vehicleBuffer
+    ? decodeVehicles(vehicleBuffer, profiled, cycleSurvey)
+    : { vehicles: [] }
+
+  // A producer with nothing live to say often republishes the timetable rather than going
+  // quiet, and the result is indistinguishable from a prediction unless somebody looks.
+  countSchedulePassthrough(updates, scheduleIndex.scheduledAt, cycleSurvey)
+  mergeSurvey(survey, cycleSurvey)
+
+  const events = tripTracker.ingest({ at, updates, vehicles }, schedule, scheduleIndex.resolveServiceDate)
+  if (events.length === 0) return
+
+  const deviations = []
+  for (const event of events) {
+    const d = deviationTracker.from(event, schedule, config.profile.holdOffsetSeconds)
+    if (d) deviations.push(d)
+  }
+
+  deviationTracker.prune(at)
+  await eventlog.append(deviations)
 }
 
 // ETD moves slower than positions do, so it is fetched on its own cadence rather than
@@ -364,9 +472,27 @@ async function step(): Promise<void> {
 }
 
 /** Requests per hour this configuration will spend on polling alone. */
+/**
+ * Requests per hour this configuration spends on polling alone.
+ *
+ * In `rg` mode the answer does not depend on how many agencies are published, which is the
+ * whole point. In `siri` mode it is one request per agency per cycle -- and with the
+ * default `POLLED_AGENCIES=*` there is no list to count, so the escape hatch is costed
+ * against the number of operators the regional feed actually carries. At two dozen
+ * operators that is thousands of requests an hour against a budget of six hundred: `siri`
+ * is no longer a drop-in fallback, it is "poll a named subset", and the guard below says so
+ * rather than leaving it to be discovered.
+ */
+const REGIONAL_OPERATORS = 24
+
 function sweepCostPerHour(): number {
   const cycles = 3600 / config.poll.intervalSeconds
-  if (config.poll.mode === 'siri') return Math.round(config.poll.agencies.length * cycles)
+  if (config.poll.mode === 'siri') {
+    const agencies = config.poll.allAgencies
+      ? REGIONAL_OPERATORS
+      : config.poll.agencies.length
+    return Math.round(agencies * cycles)
+  }
   return Math.round((config.poll.vehicles ? 2 : 1) * cycles)
 }
 
@@ -375,7 +501,7 @@ export function startPoller(): void {
     console.info('[poller] disabled by configuration; departures will be fetched on demand')
     return
   }
-  if (config.poll.agencies.length === 0) {
+  if (config.poll.agencies.length === 0 && !config.poll.allAgencies) {
     console.warn('[poller] no agencies configured; nothing to poll')
     return
   }
@@ -389,14 +515,16 @@ export function startPoller(): void {
         `${config.poll.intervalSeconds}s = ~${perHour}/hour of ${budget}`,
     )
   } else {
+    const covering = config.poll.allAgencies
+      ? 'every operator in the feed'
+      : `${config.poll.agencies.length} agencies`
     console.info(
       `[poller] regional mode: ${config.poll.vehicles ? 2 : 1} request(s) every ` +
-        `${config.poll.intervalSeconds}s covering ${config.poll.agencies.length} agencies ` +
-        `= ~${perHour}/hour of ${budget}`,
+        `${config.poll.intervalSeconds}s covering ${covering} = ~${perHour}/hour of ${budget}`,
     )
   }
 
-  if (config.bart.enabled && config.poll.agencies.includes('BA')) {
+  if (config.bart.enabled && (config.poll.allAgencies || config.poll.agencies.includes('BA'))) {
     // Said explicitly so nobody later "fixes" sweepCostPerHour() to include these.
     console.info(
       `[poller] BART: etd every ${config.bart.etdIntervalSeconds}s, positions every ` +
@@ -408,7 +536,11 @@ export function startPoller(): void {
     console.error(
       `[poller] CONFIGURATION ERROR: polling alone needs ${perHour} requests/hour but the ` +
         `key pool only allows ${budget}. Raise POLL_INTERVAL_SECONDS, add keys, or raise ` +
-        `FIVEELEVEN_HOURLY_LIMIT if 511 granted an increase.`,
+        `FIVEELEVEN_HOURLY_LIMIT if 511 granted an increase.` +
+        (config.poll.mode === 'siri'
+          ? ` In siri mode the cost is one request per agency per cycle, so set ` +
+            `POLLED_AGENCIES to a named subset rather than '*'.`
+          : ''),
     )
   } else if (perHour > budget * 0.9) {
     console.warn(
@@ -421,6 +553,12 @@ export function startPoller(): void {
   // rather than after a full interval of silence.
   void step()
   timer = setInterval(() => void step(), stepMs())
+
+  if (config.profile.enabled) {
+    // Bound to this instance's lease, so a replica that is not polling also does not learn.
+    startLearner(instanceId)
+    void warehouse.connect().then(() => scheduleIndex.refresh(true))
+  }
 
   if (config.poll.mode === 'rg') {
     // The first static load is handled by `pollRegional` when it finds the tables
@@ -439,6 +577,8 @@ export function startPoller(): void {
 export async function stopPoller(): Promise<void> {
   if (timer) { clearInterval(timer); timer = null }
   if (staticTimer) { clearInterval(staticTimer); staticTimer = null }
+  await stopLearner()
+  await warehouse.close()
   // Release the lock on a clean shutdown so a redeploy's replacement can start
   // polling immediately instead of waiting out our lease.
   try {

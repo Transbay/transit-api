@@ -49,7 +49,7 @@ import { fetchBartStations } from './bart.js'
  * `finally`, and nothing here decodes those bytes — but if you ever add debug output
  * around this function, do not dump the tail of the file.
  */
-async function trimTrailingBytes(zipPath: string): Promise<void> {
+export async function trimTrailingBytes(zipPath: string): Promise<void> {
   const handle = await openFile(zipPath, 'r')
   let size: number
   let tail: Buffer
@@ -123,7 +123,7 @@ export interface TripInfo {
 // ---------------------------------------------------------------------------
 
 /** A minimal RFC 4180 splitter. */
-function splitCSV(line: string): string[] {
+export function splitCSV(line: string): string[] {
   const out: string[] = []
   let cur = ''
   let quoted = false
@@ -150,7 +150,7 @@ function splitCSV(line: string): string[] {
  * so a future column reorder degrades to a full parse instead of silently reading
  * nothing.
  */
-async function readCSV(
+export async function readCSV(
   zipPath: string,
   entryName: string,
   onRow: (row: Record<string, string>) => void,
@@ -205,6 +205,113 @@ async function readCSV(
       const row: Record<string, string> = {}
       for (let i = 0; i < header.length; i++) row[header[i]] = cells[i] ?? ''
       onRow(row)
+      count++
+    }
+    return count
+  } finally {
+    zip.close()
+  }
+}
+
+/**
+ * The same stream, without allocating an object per row.
+ *
+ * `readCSV` builds a `Record<string, string>` for every surviving row, which is exactly
+ * the right shape for `routes.txt` (a few thousand rows) and exactly the wrong one for
+ * `stop_times.txt`. Filtered to five agencies that file still yields on the order of two
+ * and a half million rows, and two and a half million ten-key objects is twenty to forty
+ * seconds of pure allocation and garbage collection — inside a process that is also
+ * supposed to be answering departures every fifteen seconds.
+ *
+ * So: resolve the column indices once against the header, then hand the caller the raw
+ * cells. Same parsing, same prefilter, roughly a quarter of the time and none of the
+ * garbage.
+ */
+export async function readCSVPositional(
+  zipPath: string,
+  entryName: string,
+  columns: string[],
+  onRow: (cells: string[], index: (name: string) => number) => void | Promise<void>,
+  opts?: { prefilter?: (line: string) => boolean; firstColumn?: string },
+): Promise<number> {
+  let indices = new Map<string, number>()
+  const index = (name: string) => indices.get(name) ?? -1
+  let resolved = false
+
+  return readCSVRaw(
+    zipPath,
+    entryName,
+    (cells, header) => {
+      if (!resolved) {
+        indices = new Map(columns.map((c) => [c, header.indexOf(c)]))
+        const missing = columns.filter((c) => indices.get(c) === -1)
+        if (missing.length > 0) {
+          console.warn(`[gtfs] ${entryName}: missing column(s) ${missing.join(', ')}`)
+        }
+        resolved = true
+      }
+      return onRow(cells, index)
+    },
+    opts,
+  )
+}
+
+/** The shared streaming core. Splits, never allocates a row object. */
+async function readCSVRaw(
+  zipPath: string,
+  entryName: string,
+  onRow: (cells: string[], header: string[]) => void | Promise<void>,
+  opts?: { prefilter?: (line: string) => boolean; firstColumn?: string },
+): Promise<number> {
+  const zip = await new Promise<yauzl.ZipFile>((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true, autoClose: false }, (err, z) =>
+      err ? reject(err) : resolve(z),
+    )
+  })
+
+  try {
+    const stream = await new Promise<NodeJS.ReadableStream | null>((resolve, reject) => {
+      zip.on('entry', (entry: yauzl.Entry) => {
+        if (entry.fileName !== entryName) {
+          zip.readEntry()
+          return
+        }
+        zip.openReadStream(entry, (err, st) => (err ? reject(err) : resolve(st!)))
+      })
+      zip.on('end', () => resolve(null))
+      zip.on('error', reject)
+      zip.readEntry()
+    })
+
+    if (!stream) throw new Error(`${entryName} not found in regional GTFS archive`)
+
+    let header: string[] | null = null
+    let prefilter = opts?.prefilter
+    let count = 0
+    for await (const raw of createInterface({ input: stream, crlfDelay: Infinity })) {
+      const line = header === null ? raw.replace(/^\ufeff/, '') : raw
+      if (!line) continue
+      if (header === null) {
+        header = splitCSV(line)
+        if (opts?.prefilter && opts.firstColumn && header[0] !== opts.firstColumn) {
+          // The prefilter tests the raw line, which is only sound if the column it keys on
+          // really is first. Degrading to a full parse is slow; silently reading nothing
+          // would be worse.
+          console.warn(
+            `[gtfs] ${entryName}: expected '${opts.firstColumn}' first but found ` +
+              `'${header[0]}'; parsing every row instead of prefiltering`,
+          )
+          prefilter = undefined
+        }
+        continue
+      }
+      if (prefilter && !prefilter(line)) continue
+      // Awaited only when the callback actually returns something. A caller that writes in
+      // batches needs to apply back-pressure a few hundred times across two and a half
+      // million rows; awaiting every row instead would add two and a half million
+      // microtask hops to a parse that is already the slowest thing in the service.
+      const pending = onRow(splitCSV(line), header)
+      if (pending) await pending
       count++
     }
     return count
@@ -538,21 +645,45 @@ function unpackTrip(packed: string): TripInfo {
   return { lineName, destination, directionRef, lineRef, shortName: shortName ?? '' }
 }
 
-/** Loads the whole trip table into memory for one poll cycle. */
+/**
+ * The name tables, memoised on the feed version.
+ *
+ * These are ~94,000 and ~30,000 fields and they change once a day. Re-pulling them from
+ * Redis every fifteen seconds moved several megabytes a cycle — hundreds of kilobytes a
+ * second, sustained, forever — and rebuilt two large Maps for bytes that were identical to
+ * the ones already in memory. `loadBartGeometry` below has always been memoised this way;
+ * these two simply never were.
+ */
+let tripTableCache: { version: string; table: Map<string, TripInfo> } | null = null
+let stopTableCache: { version: string; table: Map<string, StopInfo> } | null = null
+
+async function feedVersion(): Promise<string> {
+  return (await redis.get(VERSION_KEY)) ?? ''
+}
+
+/** Loads the whole trip table into memory. Cheap after the first call each day. */
 export async function loadTripTable(): Promise<Map<string, TripInfo>> {
+  const version = await feedVersion()
+  if (tripTableCache && tripTableCache.version === version) return tripTableCache.table
+
   const all = await redis.hgetall(TRIP_KEY)
   const out = new Map<string, TripInfo>()
   for (const [tripId, packed] of Object.entries(all)) out.set(tripId, unpackTrip(packed))
+  tripTableCache = { version, table: out }
   return out
 }
 
 export async function loadStopTable(): Promise<Map<string, StopInfo>> {
+  const version = await feedVersion()
+  if (stopTableCache && stopTableCache.version === version) return stopTableCache.table
+
   const all = await redis.hgetall(STOP_KEY)
   const out = new Map<string, StopInfo>()
   for (const [stopId, packed] of Object.entries(all)) {
     const [name, lat, lon] = packed.split(US)
     out.set(stopId, { name, lat: Number(lat), lon: Number(lon) })
   }
+  stopTableCache = { version, table: out }
   return out
 }
 

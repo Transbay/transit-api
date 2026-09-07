@@ -104,11 +104,22 @@ export const config = {
      * `siri` — the previous per-agency SIRI sweep, for fallback only.
      */
     mode: optional('POLL_MODE', 'rg') === 'siri' ? ('siri' as const) : ('rg' as const),
-    /** 511 operator IDs whose snapshots we publish. */
-    agencies: optional('POLLED_AGENCIES', 'BA,SF,CT,SA,GG,AC,SM,MA')
+    /**
+     * 511 operator IDs whose snapshots we publish, or `*` for every operator the
+     * regional feed carries.
+     *
+     * `*` is the default and costs nothing: the two protobufs already contain all
+     * twenty-four operators, so filtering them out saves a little Redis and no requests
+     * at all. Discovering the list from the feed rather than hard-coding it means an
+     * operator joining 511 appears on its own, and one leaving stops being reported as
+     * missing.
+     */
+    agencies: optional('POLLED_AGENCIES', '*')
       .split(',')
       .map((a) => a.trim())
-      .filter(Boolean),
+      .filter((a) => Boolean(a) && a !== '*'),
+    /** True when no explicit list was given, so every agency in the feed is published. */
+    allAgencies: optional('POLLED_AGENCIES', '*').split(',').some((a) => a.trim() === '*'),
     /** Seconds between sweeps. */
     intervalSeconds: Number(optional('POLL_INTERVAL_SECONDS', '15')),
     /**
@@ -127,6 +138,90 @@ export const config = {
     hybrid: optional('ON_DEMAND_ENABLED', 'false') === 'true',
     /** How stale a snapshot must be before a live request is worth spending. */
     onDemandAfterSeconds: Number(optional('ON_DEMAND_AFTER_SECONDS', '45')),
+  },
+
+  /**
+   * The delay profile: the historical half of this service.
+   *
+   * Every value is optional and the whole subsystem is off by default in the sense that
+   * matters — with no `DATABASE_URL` it never runs, and the live departures path is
+   * identical either way. Nothing under here may become a dependency of `/v1/departures`.
+   */
+  profile: {
+    enabled: optional('PROFILE_ENABLED', 'true') === 'true',
+    /**
+     * Which operators get a history.
+     *
+     * Deliberately a short list rather than everything the feed carries. Learning a
+     * profile means storing a stop-level event for every vehicle at every stop all day,
+     * and there is no reason to pay that for an operator nobody has asked about. These
+     * five are the ones the app's users actually save.
+     */
+    agencies: optional('PROFILED_AGENCIES', 'SF,BA,CT,SM,GG')
+      .split(',')
+      .map((a) => a.trim())
+      .filter(Boolean),
+    /**
+     * How fast the profile forgets. Three weeks: long enough to survive a quiet fortnight
+     * on a Sunday route, short enough that a signal retimed in March stops arguing in June.
+     */
+    halfLifeDays: Number(optional('PROFILE_HALF_LIFE_DAYS', '21')),
+    /**
+     * Within-day correlation between consecutive trips on a route.
+     *
+     * Used to discount sample sizes. Consecutive trips ten minutes apart share nearly all
+     * their causes, so counting them as independent observations inflates every n in the
+     * system and makes every confidence interval too narrow. Measured per agency once
+     * there is enough history; this is the prior.
+     */
+    icc: Number(optional('PROFILE_ICC', '0.5')),
+    /** Seconds after its published time a held vehicle actually leaves a timepoint. */
+    holdOffsetSeconds: Number(optional('PROFILE_HOLD_OFFSET', '12')),
+    /** How often the learner folds new observations into the profile. */
+    learnIntervalSeconds: Number(optional('PROFILE_LEARN_INTERVAL', '300')),
+    /** How often buffered observations are flushed to the warehouse. */
+    flushIntervalSeconds: Number(optional('PROFILE_FLUSH_INTERVAL', '30')),
+    /** Days of raw stop-level history kept before the daily partition is dropped. */
+    retentionDays: Number(optional('PROFILE_RETENTION_DAYS', '90')),
+    /**
+     * How much of the event stream may back up in Redis before the oldest is dropped.
+     *
+     * Losing history is always preferable to delaying a departure, and this is where that
+     * rule is enforced rather than merely stated.
+     */
+    streamMaxLen: Number(optional('PROFILE_STREAM_MAXLEN', '200000')),
+  },
+
+  /**
+   * Corrected predictions.
+   *
+   * `off` computes nothing. `shadow` computes and records but reports every prediction at
+   * `confidence: none` with `predicted == raw`. `on` lets the evidence decide, per agency
+   * and per horizon, via the promotion gate in `score.ts`.
+   *
+   * None of these settings can change `/v1/departures`, which serves raw agency times in
+   * every mode. Corrections live on `/v1/predictions` only.
+   */
+  predictions: {
+    mode: (() => {
+      const raw = optional('PREDICTION_MODE', 'shadow')
+      return raw === 'on' || raw === 'off' ? raw : ('shadow' as const)
+    })() as 'off' | 'shadow' | 'on',
+    /** Effective samples below which a segment never offers a correction. */
+    minSamples: Number(optional('PREDICTION_MIN_SAMPLES', '3')),
+  },
+
+  /**
+   * The warehouse. Railway sets `DATABASE_URL` when you add the Postgres plugin.
+   *
+   * Absent is a supported configuration, not a broken one: the service boots, serves every
+   * existing endpoint, and simply learns nothing.
+   */
+  warehouse: {
+    url: process.env.DATABASE_URL || null,
+    poolSize: Number(optional('DATABASE_POOL_SIZE', '4')),
+    /** Skip schema migration at boot. For a replica that must not race the leader. */
+    migrate: optional('DATABASE_MIGRATE', 'true') === 'true',
   },
 
   /**

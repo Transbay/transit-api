@@ -108,9 +108,37 @@ export interface AgencySnapshotStatus {
   ageSeconds: number | null
 }
 
+/**
+ * The agencies we have actually written a snapshot for.
+ *
+ * Kept as a set rather than read from configuration, because the configuration is now
+ * usually `*` -- publish whatever the regional feed carries. Discovering the list from the
+ * feed means an operator joining 511 appears on its own and one leaving stops being
+ * reported as permanently stale.
+ */
+const AGENCY_SET_KEY = '511:snap:agencies'
+
+export async function rememberAgency(agency: string): Promise<void> {
+  try {
+    await redis.sadd(AGENCY_SET_KEY, agency)
+  } catch {
+    // /health loses a row. Nothing a rider can see.
+  }
+}
+
+export async function knownAgencies(): Promise<string[]> {
+  try {
+    const stored = await redis.smembers(AGENCY_SET_KEY)
+    if (stored.length > 0) return stored.sort()
+  } catch {
+    // Fall through to the configured list.
+  }
+  return config.poll.agencies
+}
+
 /** Per-agency snapshot state, for /health. */
 export async function snapshotStatus(): Promise<AgencySnapshotStatus[]> {
-  const agencies = config.poll.agencies
+  const agencies = await knownAgencies()
   const results = await redis
     .pipeline(
       agencies.flatMap((a) => [
