@@ -53,7 +53,11 @@ export const CHARACTER_LABEL: Record<SegmentCharacter, string> = {
   recovery: 'recovers delay',
   congestion: 'loses time',
   reliable: 'runs to schedule',
-  unknown: 'not enough data',
+  // Not "not enough data": a segment can have enough evidence to move a prediction
+  // (PREDICTION_MIN_SAMPLES, 3) while having too little to be called padding rather than
+  // recovery (10). Both are true at n=4, and the old wording made the row contradict its
+  // own purple marker.
+  unknown: 'unclassified',
 }
 
 // ---------------------------------------------------------------------------
