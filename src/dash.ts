@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify'
 import * as warehouse from './warehouse.js'
 import { buildRows, colourFor, characterise, CHARACTER_LABEL } from './analysis.js'
 import { page, esc, jsonLiteral } from './chrome.js'
+import { loadStopTable } from './gtfs.js'
+import { mapkitConfigured } from './mapkit.js'
 import { DAY_TYPE_NAMES, BUCKETS_PER_DAY, formatGtfsTime } from './servicedate.js'
 
 /**
@@ -33,6 +35,11 @@ interface BucketCell {
 interface SegmentPayload {
   from: string
   to: string
+  /** Endpoint coordinates, absent when the static feed has no position for a stop. */
+  fromLat?: number
+  fromLon?: number
+  toLat?: number
+  toLon?: number
   sched: number
   mean: number
   slope: number
@@ -88,6 +95,22 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
 
     const rows = await buildRows(agency, qualified, direction, dayType)
 
+    // The hop's stop ids survive on segmentKey even though buildRows resolves the display
+    // names, which is what lets the map draw a line the table can only describe.
+    const stops = await loadStopTable().catch(() => new Map())
+    const coordsFor = (segmentKey: string) => {
+      const [from, rest] = segmentKey.split('>')
+      const to = (rest ?? '').split('#')[0]
+      const a = stops.get(from)
+      const b = stops.get(to)
+      return {
+        fromLat: a?.lat,
+        fromLon: a?.lon,
+        toLat: b?.lat,
+        toLon: b?.lon,
+      }
+    }
+
     const active: number[] = []
     for (let b = 0; b < BUCKETS_PER_DAY; b++) {
       if (rows.some((r) => (r.buckets.get(b)?.n ?? 0) > 0)) active.push(b)
@@ -96,6 +119,7 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
     const segments: SegmentPayload[] = rows.map((r) => {
       const ch = characterise(r.mean, r.slope, r.n)
       return {
+        ...coordsFor(r.segmentKey),
         from: r.fromStop,
         to: r.toStop,
         sched: Math.round(r.scheduledRun),
@@ -126,6 +150,7 @@ export async function registerDash(app: FastifyInstance): Promise<void> {
       buckets: active.map((b) => ({ b, label: formatGtfsTime(b * 1800).slice(0, 5) })),
       segments,
       totalObservations: segments.reduce((s, x) => s + x.n, 0),
+      mapsEnabled: mapkitConfigured(),
     }
   })
 
@@ -162,6 +187,10 @@ td.sum { text-align:right; font-variant-numeric:tabular-nums; }
 .chip.padding { color:var(--accent-soft); border-color:#7DD3FC55; }
 .chip.congestion { color:#F87171; border-color:#F8717155; }
 .chip.unknown { color:var(--ink-faint); }
+#map { height:460px; border-radius:12px; overflow:hidden; background:#0f1115; }
+.maphint { color:var(--ink-faint); font-size:.76rem; margin-top:.6rem; }
+.mapsel { color:var(--ink-dim); font-size:.82rem; margin-top:.6rem; min-height:1.2em; }
+.mapsel b { color:var(--ink); font-weight:600; }
 `
 
 function renderDash(): string {
@@ -185,6 +214,17 @@ function renderDash(): string {
       <span class="pill" id="obs">—</span>
     </div>
     <p class="sub" id="hint"></p>
+  </section>
+
+  <section class="panel" id="mapPanel" hidden>
+    <h2>Where it happens</h2>
+    <div id="map"></div>
+    <div class="mapsel" id="mapsel">Tap a segment for its numbers.</div>
+    <p class="maphint">
+      Each hop is drawn between its two stops and coloured the same way the table is:
+      blue gains time, red loses it, and the colour fades as the evidence thins. A hop whose
+      stops have no coordinates in the static feed is in the table but not on the map.
+    </p>
   </section>
 
   <div id="heat"></div>
@@ -327,6 +367,88 @@ function heatTable(d) {
          '</tbody></table></div>';
 }
 
+// --- map -------------------------------------------------------------------
+// Loaded lazily and only when a key is configured, so a deploy without one is a page
+// without a map rather than a page with a broken one.
+let mapkitReady = null, theMap = null, overlays = [];
+
+function loadMapkit() {
+  if (mapkitReady) return mapkitReady;
+  mapkitReady = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.apple-mapkit.com/mk/5.x.x/mapkit.js';
+    s.crossOrigin = 'anonymous';
+    s.onerror = () => reject(new Error('mapkit.js failed to load'));
+    s.onload = () => {
+      try {
+        mapkit.init({
+          authorizationCallback: (done) => {
+            fetch('/v1/mapkit/token', {cache:'no-store'})
+              .then(r => r.ok ? r.text() : Promise.reject(new Error('token ' + r.status)))
+              .then(done)
+              .catch(reject);
+          },
+        });
+        resolve();
+      } catch (e) { reject(e); }
+    };
+    document.head.appendChild(s);
+  });
+  return mapkitReady;
+}
+
+function drawMap(d) {
+  const hops = d.segments.filter(s =>
+    typeof s.fromLat === 'number' && typeof s.fromLon === 'number' &&
+    typeof s.toLat === 'number' && typeof s.toLon === 'number');
+  const panel = $('mapPanel');
+  if (!d.mapsEnabled || !hops.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  loadMapkit().then(() => {
+    if (!theMap) {
+      theMap = new mapkit.Map('map', {
+        colorScheme: mapkit.Map.ColorSchemes.Dark,
+        showsCompass: mapkit.FeatureVisibility.Hidden,
+        showsScale: mapkit.FeatureVisibility.Adaptive,
+      });
+    }
+    theMap.removeOverlays(overlays);
+    overlays = hops.map(s => {
+      const o = new mapkit.PolylineOverlay(
+        [new mapkit.Coordinate(s.fromLat, s.fromLon),
+         new mapkit.Coordinate(s.toLat, s.toLon)],
+        { style: new mapkit.Style({ lineWidth: 7, lineCap: 'round',
+                                    strokeColor: s.colour || '#38BDF8' }) });
+      o.data = s;
+      return o;
+    });
+    theMap.addOverlays(overlays);
+
+    // Frame the route rather than the region: a fixed span puts half of Muni off-screen.
+    const lats = hops.flatMap(s => [s.fromLat, s.toLat]);
+    const lons = hops.flatMap(s => [s.fromLon, s.toLon]);
+    const cLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+    const cLon = (Math.min(...lons) + Math.max(...lons)) / 2;
+    theMap.region = new mapkit.CoordinateRegion(
+      new mapkit.Coordinate(cLat, cLon),
+      new mapkit.CoordinateSpan(
+        Math.max(0.01, (Math.max(...lats) - Math.min(...lats)) * 1.3),
+        Math.max(0.01, (Math.max(...lons) - Math.min(...lons)) * 1.3)));
+
+    theMap.addEventListener('select', (ev) => {
+      const s = ev.overlay && ev.overlay.data;
+      if (!s) return;
+      $('mapsel').innerHTML = '<b>' + s.from + ' → ' + s.to + '</b> · scheduled ' + s.sched +
+        's · mean ' + (s.mean > 0 ? '+' : '') + s.mean + 's · slope ' + s.slope.toFixed(2) +
+        ' · n=' + s.n + ' · ' + s.characterLabel;
+    });
+  }).catch(e => {
+    panel.hidden = false;
+    $('mapsel').textContent = 'Map unavailable: ' + e.message;
+  });
+}
+
 async function loadRoute() {
   const q = new URLSearchParams({
     agency: $('agency').value, route: $('route').value,
@@ -338,6 +460,7 @@ async function loadRoute() {
     $('obs').textContent = d.totalObservations.toLocaleString() + ' observations · ' +
       d.segments.length + ' segments';
     $('heat').innerHTML = heatTable(d);
+    drawMap(d);
   } catch (e) {
     $('heat').innerHTML = '<div class="panel"><p class="empty">could not load this route</p></div>';
   }

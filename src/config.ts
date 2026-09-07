@@ -65,6 +65,41 @@ export const config = {
     allowDevelopmentAttestations: optional('ALLOW_DEV_ATTESTATION', 'false') === 'true',
   },
 
+  mapkit: {
+    /**
+     * MapKit JS. Absent configuration disables the maps and nothing else -- the pages that
+     * use them fall back to their tables, because a missing map is a worse page and a
+     * broken deploy is a worse day.
+     */
+    /** From Apple Developer -> Keys, on a key with MapKit JS enabled. Not a secret. */
+    keyId: optional('MAPKIT_KEY_ID', ''),
+    /** The same Apple Developer team as App Attest unless deliberately overridden. */
+    teamId: optional('MAPKIT_TEAM_ID', process.env.APPLE_TEAM_ID ?? ''),
+    /**
+     * The contents of the .p8 file. A private key: it belongs in a Railway variable and
+     * must never reach the repository. Stored with real newlines or with the escaped `\n`
+     * that pasting through a form tends to produce; both are accepted.
+     */
+    privateKey: optional('MAPKIT_PRIVATE_KEY', '').replace(/\\n/g, '\n').trim(),
+    /**
+     * Which page origins may be handed a token.
+     *
+     * The `origin` claim is what stops a token lifted from these open pages being used to
+     * spend the quota elsewhere, so it cannot be derived from the request -- a caller who
+     * controls the Host header would simply mint themselves a matching one. It is an
+     * allowlist, checked against the browser's Origin header.
+     */
+    origins: optional(
+      'MAPKIT_ORIGINS',
+      'https://transitapi.transbay.dev,https://transitapi-production.up.railway.app',
+    )
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
+    /** Short, because the page refreshes it and a leaked token should expire quickly. */
+    ttlSeconds: Number(optional('MAPKIT_TOKEN_TTL_SECONDS', '1800')),
+  },
+
   auth: {
     /** Signs the session tokens we hand out after a successful attestation. */
     jwtSecret: required('JWT_SECRET'),

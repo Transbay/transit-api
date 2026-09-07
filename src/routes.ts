@@ -12,6 +12,7 @@ import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
 import { registerBoard } from './board.js'
+import { registerMapkit } from './mapkit.js'
 import { predictionsFor, indexStatus } from './predictions.js'
 import { learnerStatus } from './learner.js'
 import * as warehouse from './warehouse.js'
@@ -260,6 +261,10 @@ export async function registerRoutes(app: FastifyInstance) {
   // answers if you already know the route AND the day type -- and the day type is a trap,
   // since owl service files under the previous day. This one offers what exists.
   await registerDash(app)
+
+  // Mints the short-lived, origin-restricted token MapKit JS needs. Optional: with no key
+  // configured it reports 503 and the pages fall back to their tables.
+  await registerMapkit(app)
 
   // A board for every operator, not just BART. Registered LAST on purpose: it owns the
   // two- and three-segment catch-alls (`/sf/15419`, `/sf/14/15419`), and while Fastify
