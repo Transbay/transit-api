@@ -142,13 +142,25 @@ async function build(
     const byTrip = new Map(predicted.predictions.map((p) => [p.tripId, p]))
     for (const d of departures) {
       const p = d.tripId ? byTrip.get(d.tripId) : undefined
-      // `predicted === raw` is how predictionsFor declines. Treat it as no correction
-      // rather than a correction of zero, so the indicator counts only real ones.
-      if (!p || p.predicted === p.raw) continue
-      const ms = Date.parse(p.predicted)
+      if (!p) continue
+
+      // `p50` rather than `predicted`, deliberately.
+      //
+      // In shadow mode `predicted` is the agency's own time: the gate is about what the
+      // public API is willing to *claim*, and that gate should not be weakened to make an
+      // internal page more interesting. But the model's actual estimate is still there in
+      // `p50`, and this page exists to show it -- marked, in purple, next to the agency's
+      // number, so it can be argued with. `/v1/departures` is untouched either way.
+      const ms = Date.parse(p.p50)
       if (Number.isNaN(ms)) continue
+
+      const delta = Math.round((ms - Date.parse(p.raw)) / 1000)
+      // Under half a minute is not a correction anybody can act on, and marking it purple
+      // would make the indicator meaningless by making it permanent.
+      if (Math.abs(delta) < 30) continue
+
       d.correctedMs = ms
-      d.correctionSeconds = p.correctionSeconds
+      d.correctionSeconds = delta
       d.confidence = p.confidence
       d.samples = p.evidence?.samples
       corrected++
