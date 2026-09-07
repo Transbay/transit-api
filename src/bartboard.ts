@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { readSnapshot, readVehicles } from './snapshot.js'
 import { loadBartGeometry } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
+import { page, esc, jsonLiteral } from './chrome.js'
 
 // A public BART board, for checking the position estimate against reality.
 //
@@ -221,52 +222,35 @@ export async function registerBartBoard(app: FastifyInstance): Promise<void> {
 // Page
 // ---------------------------------------------------------------------------
 
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
-}
+
+const BART_STYLE = `
+.cd { font-family:var(--font-display); font-weight:600; font-size:1.35rem;
+      font-variant-numeric:tabular-nums; }
+.now { color:var(--good); }
+.late { color:var(--warn); }
+.dim { color:var(--ink-faint); font-size:.78rem; }
+.train { border:1px solid var(--edge); border-radius:12px; padding:.75rem .9rem;
+         margin-bottom:.55rem; background:var(--panel-bg); }
+.train b { font-weight:600; }
+.grid { display:grid; grid-template-columns:auto 1fr; gap:2px 14px; font-size:.8rem;
+        margin-top:.45rem; }
+.grid span:nth-child(odd) { color:var(--ink-faint); }
+.stale { border:1px solid #7a5a20; background:#3a2a1255; color:var(--warn);
+         padding:.7rem .9rem; border-radius:12px; margin-bottom:1rem; font-size:.85rem; }
+.doubt { opacity:.45; }
+.err { color:var(--warn); }
+code { font-family:var(--font-mono); background:#1a1e24; padding:1px 5px; border-radius:4px; }
+table { width:100%; }
+`
 
 function renderPage(data: Record<string, unknown>): string {
-  const json = JSON.stringify(data).replace(/</g, '\\u003c')
-  const title =
-    'error' in data
-      ? 'Unknown station'
-      : `${esc(String((data.station as { name: string }).name))} · BART`
+  const json = jsonLiteral(data)
+  const failed = 'error' in data
+  const title = failed
+    ? 'Unknown station'
+    : String((data.station as { name: string }).name)
 
-  return `<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title>
-<style>
-  :root { color-scheme: dark light; --bg:#0d0f12; --fg:#e8eaed; --dim:#9aa0a6; --line:#232830; --ok:#5bd07a; --warn:#ffcc44; }
-  * { box-sizing:border-box }
-  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
-         font:15px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
-  h1 { font-size:17px; margin:0 0 2px; letter-spacing:.02em }
-  .sub { color:var(--dim); font-size:13px; margin-bottom:16px }
-  table { width:100%; border-collapse:collapse; margin-bottom:22px }
-  th { text-align:left; font-weight:500; color:var(--dim); font-size:11px;
-       text-transform:uppercase; letter-spacing:.08em; padding:0 8px 6px 0; border-bottom:1px solid var(--line) }
-  td { padding:7px 8px 7px 0; border-bottom:1px solid var(--line); vertical-align:top }
-  .cd { font-variant-numeric:tabular-nums; font-size:19px; font-weight:600 }
-  .now { color:var(--ok) }
-  .late { color:var(--warn) }
-  .dim { color:var(--dim); font-size:12px }
-  .train { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin-bottom:8px }
-  .train b { font-weight:600 }
-  .grid { display:grid; grid-template-columns:auto 1fr; gap:2px 14px; font-size:12.5px; margin-top:6px }
-  .grid span:nth-child(odd) { color:var(--dim) }
-  .foot { color:var(--dim); font-size:11.5px; margin-top:20px; line-height:1.7 }
-  .stale { background:#3a2a12; border:1px solid #7a5a20; color:var(--warn);
-           padding:8px 11px; border-radius:6px; margin-bottom:14px; font-size:13px }
-  .doubt { opacity:.45 }
-  .err { color:var(--warn) }
-  code { background:#1a1e24; padding:1px 5px; border-radius:3px }
-</style>
-</head><body>
-<div id="root">loading…</div>
-<script>
-const DATA = ${json};
+  const script = `const DATA = ${json};
 function pad(n){ return String(n).padStart(2,'0') }
 // Floor, not round: BART calls the last 60 seconds "Leaving", and so do we.
 function countdown(ms){
@@ -370,7 +354,14 @@ setInterval(async () => {
     // board tick confidently for five minutes.
     DATA.lastError = 'connection failed';
   }
-}, 15000);
-</script>
-</body></html>`
+}, 15000);`
+
+  return page(title, '<div id="root">loading…</div>', {
+    subtitle: failed ? 'BART' : 'BART · live departures and synthesized train positions',
+    headerRight:
+      '<span class="pill"><span class="dot"></span>live</span>' +
+      '<a class="pill" href="/dash">profiles</a>',
+    style: BART_STYLE,
+    script,
+  })
 }

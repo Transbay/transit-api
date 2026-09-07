@@ -3,6 +3,7 @@ import * as warehouse from './warehouse.js'
 import { loadStopTable } from './gtfs.js'
 import { DAY_TYPE_NAMES, DayType, BUCKETS_PER_DAY, formatGtfsTime } from './servicedate.js'
 import { asRate, SEGMENT_MIN_RUN } from './schedule.js'
+import { esc } from './chrome.js'
 
 /**
  * Making the profile falsifiable.
@@ -47,7 +48,7 @@ export function characterise(mean: number, slope: number, n: number): SegmentCha
   return 'reliable'
 }
 
-const CHARACTER_LABEL: Record<SegmentCharacter, string> = {
+export const CHARACTER_LABEL: Record<SegmentCharacter, string> = {
   padding: 'scheduled slack',
   recovery: 'recovers delay',
   congestion: 'loses time',
@@ -66,7 +67,7 @@ const CHARACTER_LABEL: Record<SegmentCharacter, string> = {
  * is behind it. A confident-looking colour with four observations is exactly the sort of
  * thing people screenshot.
  */
-function colourFor(mean: number, n: number): string {
+export function colourFor(mean: number, n: number): string {
   const strength = Math.min(1, Math.abs(mean) / 120)
   const evidence = Math.min(1, n / 30)
   const alpha = (0.15 + 0.85 * strength) * (0.25 + 0.75 * evidence)
@@ -74,9 +75,6 @@ function colourFor(mean: number, n: number): string {
   return `hsla(${hue}, 72%, 46%, ${alpha.toFixed(3)})`
 }
 
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
-}
 
 function page(title: string, body: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -107,7 +105,7 @@ a { color:inherit; }
 // Routes
 // ---------------------------------------------------------------------------
 
-interface Row {
+export interface Row {
   segmentKey: string
   fromStop: string
   toStop: string
@@ -118,7 +116,7 @@ interface Row {
   buckets: Map<number, { mean: number; n: number }>
 }
 
-async function buildRows(
+export async function buildRows(
   agency: string,
   routeId: string,
   direction: number,

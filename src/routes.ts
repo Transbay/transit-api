@@ -10,6 +10,8 @@ import { bartSynthesisStatus, observationStats, feedSurvey } from './poller.js'
 import { bartBreakerStatus } from './bart.js'
 import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
+import { registerDash } from './dash.js'
+import { registerBoard } from './board.js'
 import { predictionsFor, indexStatus } from './predictions.js'
 import { learnerStatus } from './learner.js'
 import * as warehouse from './warehouse.js'
@@ -253,6 +255,17 @@ export async function registerRoutes(app: FastifyInstance) {
   // way to ship an inference is to make it easy to catch being wrong. Reads only public
   // transit data.
   await registerAnalysis(app)
+
+  // The dashboard over the same data, which exists because /analysis/:agency/:route only
+  // answers if you already know the route AND the day type -- and the day type is a trap,
+  // since owl service files under the previous day. This one offers what exists.
+  await registerDash(app)
+
+  // A board for every operator, not just BART. Registered LAST on purpose: it owns the
+  // two- and three-segment catch-alls (`/sf/15419`, `/sf/14/15419`), and while Fastify
+  // prefers static segments regardless of order, registering it after everything else
+  // means the precedence is obvious to a reader rather than a property they must know.
+  await registerBoard(app)
 
   app.get('/health', async () => {
     try {
