@@ -6,9 +6,15 @@ import { NoKeyAvailableError, BudgetUnavailableError, budgetSnapshot } from './k
 import { verifyAttestation, AttestationError } from './attest.js'
 import { readSnapshot, snapshotStatus, readVehicles } from './snapshot.js'
 import { staticStatus } from './gtfs.js'
-import { bartSynthesisStatus } from './poller.js'
+import { bartSynthesisStatus, observationStats, feedSurvey } from './poller.js'
 import { bartBreakerStatus } from './bart.js'
 import { registerBartBoard } from './bartboard.js'
+import { registerAnalysis } from './analysis.js'
+import { predictionsFor, indexStatus } from './predictions.js'
+import { learnerStatus } from './learner.js'
+import * as warehouse from './warehouse.js'
+import * as profilestore from './profilestore.js'
+import * as scheduleIndex from './scheduleindex.js'
 import {
   issueChallenge,
   consumeChallenge,
@@ -178,6 +184,32 @@ export async function registerRoutes(app: FastifyInstance) {
       },
     )
 
+    /**
+     * Corrected predictions for one stop.
+     *
+     * A new endpoint rather than a change to `/v1/departures`, deliberately. That response
+     * is byte-compatible with app builds that have been on people's phones for months and
+     * nothing here may move it; a reader who wants a correction asks for one, and every
+     * entry carries what the agency said alongside what we think and how much evidence
+     * stands behind the difference.
+     */
+    secured.get<{ Querystring: { agency?: string; stopcode?: string } }>(
+      '/v1/predictions',
+      async (request, reply) => {
+        const { agency, stopcode: stopCode } = request.query
+        if (!agency || !stopCode) {
+          return reply.code(400).send({ error: 'agency and stopcode are required' })
+        }
+        if (!config.profile.agencies.includes(agency)) {
+          return reply.code(404).send({
+            error: `No profile for agency ${agency}`,
+            profiled: config.profile.agencies,
+          })
+        }
+        return predictionsFor(agency, stopCode)
+      },
+    )
+
     /** Live vehicle positions for one agency. */
     secured.get<{ Querystring: { agency?: string; line?: string } }>(
       '/v1/vehicles',
@@ -217,12 +249,21 @@ export async function registerRoutes(app: FastifyInstance) {
   // only Redis, serves only public transit data.
   await registerBartBoard(app)
 
+  // Same reasoning as the BART board: a delay profile is an inference, and the only honest
+  // way to ship an inference is to make it easy to catch being wrong. Reads only public
+  // transit data.
+  await registerAnalysis(app)
+
   app.get('/health', async () => {
     try {
-      const [budget, snapshots, staticFeed] = await Promise.all([
+      const [budget, snapshots, staticFeed, learner, wh, hot, predIndex] = await Promise.all([
         budgetSnapshot(),
         snapshotStatus(),
         staticStatus(),
+        learnerStatus(),
+        warehouse.status(),
+        profilestore.status(),
+        indexStatus(),
       ])
       return {
         status: 'ok',
@@ -243,6 +284,28 @@ export async function registerRoutes(app: FastifyInstance) {
           enabled: config.bart.enabled,
           breaker: bartBreakerStatus(),
           synthesis: bartSynthesisStatus(),
+        },
+        /**
+         * The historical half.
+         *
+         * Every counter here is something that can go wrong quietly. `tierMix` says what
+         * the observations are actually made of -- an agency whose observations are all
+         * inferred cannot train a prediction-error model without measuring its own
+         * predictions against themselves. `rejected` says what is being refused and why.
+         * `streamDepth` growing means the learner is falling behind and history is about to
+         * be dropped, which is the correct trade and still worth knowing about.
+         */
+        profile: {
+          enabled: config.profile.enabled,
+          agencies: config.profile.agencies,
+          predictionMode: config.predictions.mode,
+          schedule: scheduleIndex.status(),
+          learner,
+          warehouse: wh,
+          hotProfile: hot,
+          predictionIndex: predIndex,
+          observation: observationStats(),
+          feed: feedSurvey(),
         },
         budget,
       }

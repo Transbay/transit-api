@@ -124,6 +124,8 @@ async function migrate(): Promise<void> {
   const applied = await pool!.query<{ version: number }>('SELECT version FROM schema_version')
   const done = new Set(applied.rows.map((r) => r.version))
 
+  // `.sql` files are not compiled, so they sit at the repo root beside `dist/` -- the same
+  // relative position `certs/` occupies for `attest.ts`.
   const dir = join(here, '..', 'migrations')
   const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort()
 

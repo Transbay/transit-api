@@ -12,7 +12,8 @@
     "static": "node dist/index.static.js",
     "dev": "tsc --watch & node --watch dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/**/*.test.js"
+    "test": "tsc && node --test dist/**/*.test.js",
+    "forensics": "node dist/forensics.js"
   },
   "dependencies": {
     "@peculiar/x509": "^1.11.0",

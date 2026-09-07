@@ -30,6 +30,7 @@ import { DeviationTracker } from './deviation.js'
 import * as eventlog from './eventlog.js'
 import * as scheduleIndex from './scheduleindex.js'
 import { startLearner, stopLearner } from './learner.js'
+import { writeIndex } from './predictions.js'
 import * as warehouse from './warehouse.js'
 
 /** Keeps every agency's departures current, on a schedule of our choosing. */
@@ -348,6 +349,18 @@ async function observeCycle(
   // quiet, and the result is indistinguishable from a prediction unless somebody looks.
   countSchedulePassthrough(updates, scheduleIndex.scheduledAt, cycleSurvey)
   mergeSurvey(survey, cycleSurvey)
+
+  // The parallel index /v1/predictions reads. Written here rather than folded into the
+  // departures snapshot so that the one response the app depends on keeps its exact bytes.
+  const byAgency = new Map<string, typeof updates>()
+  for (const u of updates) {
+    const agency = u.tripId.slice(0, u.tripId.indexOf(':'))
+    if (!agency) continue
+    const list = byAgency.get(agency)
+    if (list) list.push(u)
+    else byAgency.set(agency, [u])
+  }
+  for (const [agency, list] of byAgency) await writeIndex(agency, list)
 
   const events = tripTracker.ingest({ at, updates, vehicles }, schedule, scheduleIndex.resolveServiceDate)
   if (events.length === 0) return
