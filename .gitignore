@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.DS_Store
+
+# Redis snapshot, written if you run redis-server from this directory
+dump.rdb
+
+# Feed recordings from tools/forensics.ts — large, and regenerable.
+recordings/

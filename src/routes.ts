@@ -1,0 +1,285 @@
+import type { FastifyInstance } from 'fastify'
+import { config } from './config.js'
+import { cached } from './cache.js'
+import { fetchUpstream, UpstreamError } from './upstream.js'
+import { NoKeyAvailableError, BudgetUnavailableError, budgetSnapshot } from './keypool.js'
+import { verifyAttestation, AttestationError } from './attest.js'
+import { readSnapshot, snapshotStatus, readVehicles } from './snapshot.js'
+import { staticStatus } from './gtfs.js'
+import { bartSynthesisStatus } from './poller.js'
+import { bartBreakerStatus } from './bart.js'
+import { registerBartBoard } from './bartboard.js'
+import {
+  issueChallenge,
+  consumeChallenge,
+  issueSessionToken,
+  requireSession,
+} from './auth.js'
+
+/** The HTTP surface, mirroring FiveElevenClient's five methods one for one. */
+
+/** Cache keys must encode every input that changes the answer, or users see each other's stops. */
+const cacheKeys = {
+  operators: () => '511:operators',
+  lines: (operatorId: string) => `511:lines:${operatorId}`,
+  stops: (operatorId: string) => `511:stops:${operatorId}`,
+  patterns: (operatorId: string, lineId: string) => `511:patterns:${operatorId}:${lineId}`,
+  departures: (agency: string, stopCode: string) => `511:departures:${agency}:${stopCode}`,
+}
+
+export async function registerRoutes(app: FastifyInstance) {
+  // ---------------------------------------------------------------------------
+  // Attestation. Open by necessity — this is how a device earns its token.
+  // ---------------------------------------------------------------------------
+
+  app.post('/v1/attest/challenge', async () => {
+    return { challenge: await issueChallenge() }
+  })
+
+  app.post<{ Body: { keyId?: string; attestation?: string; challenge?: string } }>(
+    '/v1/attest/verify',
+    async (request, reply) => {
+      const { keyId, attestation, challenge } = request.body ?? {}
+      if (!keyId || !attestation || !challenge) {
+        return reply.code(400).send({ error: 'keyId, attestation and challenge are required' })
+      }
+
+      // Redeemed before verification, and redeemable only once. Verifying first would
+      // let an attacker grind attempts against a single live challenge.
+      if (!(await consumeChallenge(challenge))) {
+        return reply.code(401).send({ error: 'Unknown or already-used challenge' })
+      }
+
+      try {
+        const { keyId: verifiedKeyId } = await verifyAttestation(attestation, keyId, challenge)
+        const { token, expiresIn } = issueSessionToken(verifiedKeyId)
+        return { token, expiresIn }
+      } catch (err) {
+        if (err instanceof AttestationError) {
+          request.log.warn({ reason: err.message }, 'attestation rejected')
+          return reply.code(401).send({ error: 'Attestation failed' })
+        }
+        throw err
+      }
+    },
+  )
+
+  // ---------------------------------------------------------------------------
+  // Data. Everything below requires a session token.
+  // ---------------------------------------------------------------------------
+
+  app.register(async (secured) => {
+    secured.addHook('preHandler', requireSession)
+
+    secured.get('/v1/operators', async (_request, reply) => {
+      const result = await cached(cacheKeys.operators(), config.ttl.operators, () =>
+        fetchUpstream('operators', {}),
+      )
+      reply.header('x-cache', result.outcome)
+      return result.value
+    })
+
+    secured.get<{ Querystring: { operator_id?: string } }>(
+      '/v1/lines',
+      async (request, reply) => {
+        const operatorId = request.query.operator_id
+        if (!operatorId) return reply.code(400).send({ error: 'operator_id is required' })
+
+        const result = await cached(cacheKeys.lines(operatorId), config.ttl.lines, () =>
+          fetchUpstream('lines', { operator_id: operatorId }),
+        )
+        reply.header('x-cache', result.outcome)
+        return result.value
+      },
+    )
+
+    secured.get<{ Querystring: { operator_id?: string } }>(
+      '/v1/stops',
+      async (request, reply) => {
+        const operatorId = request.query.operator_id
+        if (!operatorId) return reply.code(400).send({ error: 'operator_id is required' })
+
+        const result = await cached(cacheKeys.stops(operatorId), config.ttl.stops, () =>
+          fetchUpstream('stops', { operator_id: operatorId }),
+        )
+        reply.header('x-cache', result.outcome)
+        return result.value
+      },
+    )
+
+    secured.get<{ Querystring: { operator_id?: string; line_id?: string } }>(
+      '/v1/patterns',
+      async (request, reply) => {
+        const { operator_id: operatorId, line_id: lineId } = request.query
+        if (!operatorId || !lineId) {
+          return reply.code(400).send({ error: 'operator_id and line_id are required' })
+        }
+
+        const result = await cached(
+          cacheKeys.patterns(operatorId, lineId),
+          config.ttl.patterns,
+          () => fetchUpstream('patterns', { operator_id: operatorId, line_id: lineId }),
+        )
+        reply.header('x-cache', result.outcome)
+        return result.value
+      },
+    )
+
+    /** The only endpoint under real load. */
+    secured.get<{ Querystring: { agency?: string; stopcode?: string } }>(
+      '/v1/departures',
+      async (request, reply) => {
+        const { agency, stopcode: stopCode } = request.query
+        if (!agency || !stopCode) {
+          return reply.code(400).send({ error: 'agency and stopcode are required' })
+        }
+
+        let snapshot = null
+        try {
+          snapshot = await readSnapshot(agency, stopCode)
+        } catch (err) {
+          // A snapshot read failure is not fatal — fall through to the live path.
+          request.log.warn({ err, agency, stopCode }, 'snapshot read failed')
+        }
+
+        const fresh = snapshot !== null && snapshot.ageSeconds <= config.poll.onDemandAfterSeconds
+
+        if (fresh) {
+          reply.header('x-source', 'snapshot')
+          reply.header('x-snapshot-age', String(snapshot!.ageSeconds))
+          return snapshot!.response
+        }
+
+        // The snapshot is stale, or we have none. Spend a request only if allowed to.
+        const mayFetchLive = config.poll.hybrid || snapshot === null
+        if (mayFetchLive) {
+          try {
+            const result = await cached(
+              cacheKeys.departures(agency, stopCode),
+              config.ttl.departures,
+              () => fetchUpstream('StopMonitoring', { agency, stopcode: stopCode }),
+            )
+            reply.header('x-source', 'live')
+            reply.header('x-cache', result.outcome)
+            if (result.outcome === 'stale') reply.header('x-data-stale', 'true')
+            return result.value
+          } catch (err) {
+            // Budget exhausted or 511 unreachable. An aged snapshot beats an error:
+            // times a couple of minutes old are still useful, a spinner is not.
+            if (snapshot === null) throw err
+            request.log.warn({ err, agency }, 'live fetch failed, serving aged snapshot')
+          }
+        }
+
+        reply.header('x-source', 'snapshot')
+        reply.header('x-snapshot-age', String(snapshot!.ageSeconds))
+        reply.header('x-data-stale', 'true')
+        return snapshot!.response
+      },
+    )
+
+    /** Live vehicle positions for one agency. */
+    secured.get<{ Querystring: { agency?: string; line?: string } }>(
+      '/v1/vehicles',
+      async (request, reply) => {
+        const { agency, line } = request.query
+        if (!agency) return reply.code(400).send({ error: 'agency is required' })
+
+        const stored = await readVehicles(agency)
+        if (stored === null) {
+          // Distinguishable from "no vehicles running": the agency has never been
+          // indexed, which usually means it isn't in POLLED_AGENCIES.
+          return reply.code(404).send({ error: `No vehicle data for agency ${agency}` })
+        }
+
+        const vehicles = line
+          ? stored.vehicles.filter(
+              (v) => (v as { lineRef?: string }).lineRef === line,
+            )
+          : stored.vehicles
+
+        reply.header('x-source', 'snapshot')
+        reply.header('x-snapshot-age', String(stored.ageSeconds))
+        return { agency, ageSeconds: stored.ageSeconds, vehicles }
+      },
+    )
+  })
+
+  // ---------------------------------------------------------------------------
+  // Operations.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Unauthenticated on purpose: Railway's health checks cannot attest, and this reveals
+   * nothing but aggregate counts.
+   */
+  // Open, like /health: it must work in a browser on a platform, with no token. Reads
+  // only Redis, serves only public transit data.
+  await registerBartBoard(app)
+
+  app.get('/health', async () => {
+    try {
+      const [budget, snapshots, staticFeed] = await Promise.all([
+        budgetSnapshot(),
+        snapshotStatus(),
+        staticStatus(),
+      ])
+      return {
+        status: 'ok',
+        redis: 'ok',
+        poll: {
+          enabled: config.poll.enabled,
+          mode: config.poll.mode,
+          intervalSeconds: config.poll.intervalSeconds,
+          vehicles: config.poll.vehicles,
+          hybrid: config.poll.hybrid,
+          agencies: snapshots,
+        },
+        // The static tables are the most common thing to be silently wrong: the live
+        // feed keeps working while every departure loses its name, so surface their
+        // age where a health check can see it.
+        staticFeed,
+        bart: {
+          enabled: config.bart.enabled,
+          breaker: bartBreakerStatus(),
+          synthesis: bartSynthesisStatus(),
+        },
+        budget,
+      }
+    } catch (err) {
+      return { status: 'ok', redis: 'unavailable', error: (err as Error).message }
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // One place where upstream problems become HTTP responses, so no route has to
+  // remember to translate them.
+  // ---------------------------------------------------------------------------
+
+  app.setErrorHandler((error, request, reply) => {
+    if (error instanceof NoKeyAvailableError) {
+      // Every key is spent and we had no stale copy to fall back on. Retry-After
+      // points at the top of the hour, when the budget windows roll over.
+      reply.header('retry-after', String(error.retryAfterSeconds))
+      return reply.code(503).send({
+        error: 'Upstream budget exhausted, try again shortly',
+        retryAfter: error.retryAfterSeconds,
+      })
+    }
+
+    if (error instanceof BudgetUnavailableError) {
+      // Redis is unreachable, so we can't know what we've already spent. Refusing is
+      // the safe answer; the cache layer has already tried its stale copy by now.
+      request.log.error({ err: error }, 'budget counter unreachable')
+      reply.header('retry-after', '30')
+      return reply.code(503).send({ error: 'Temporarily unavailable, try again shortly' })
+    }
+
+    if (error instanceof UpstreamError) {
+      return reply.code(error.status).send({ error: error.message })
+    }
+
+    request.log.error(error)
+    return reply.code(500).send({ error: 'Internal server error' })
+  })
+}
