@@ -130,9 +130,28 @@ export async function knownAgencies(): Promise<string[]> {
   try {
     const stored = await redis.smembers(AGENCY_SET_KEY)
     if (stored.length > 0) return stored.sort()
+
+    // The set is only written by this build, so a Redis shared with an older one -- or a
+    // replica that has not led a poll cycle yet -- has snapshots but no set. Recover the
+    // list from the keys themselves rather than reporting no agencies at all, which reads
+    // as "nothing is being polled" on a service that is merely not the leader.
+    const found = new Set<string>()
+    let cursor = '0'
+    do {
+      const [next, keys] = await redis.scan(cursor, 'MATCH', '511:snap:*', 'COUNT', 200)
+      cursor = next
+      for (const key of keys) {
+        const parts = key.split(':')
+        // `511:snap:<agency>`, and not `...:at` or `...:staging`.
+        if (parts.length === 3 && parts[2]) found.add(parts[2])
+      }
+    } while (cursor !== '0')
+    if (found.size > 0) return [...found].sort()
   } catch {
     // Fall through to the configured list.
   }
+  // Empty when POLLED_AGENCIES is `*`, which is honest: we have not been told a list and
+  // have not discovered one.
   return config.poll.agencies
 }
 
