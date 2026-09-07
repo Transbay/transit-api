@@ -1,5 +1,5 @@
 import { config } from './config.js'
-import { ScheduleIndex, type TripSchedule } from './schedule.js'
+import { ScheduleIndex, shouldReload, type TripSchedule } from './schedule.js'
 import {
   localDate,
   shiftDate,
@@ -25,6 +25,10 @@ let index = new ScheduleIndex([])
 let loadedFor: ServiceDate | null = null
 let loadedAt = 0
 let holidays = new Map<string, boolean>()
+/** The active feed versions the current index was built from, as a comparable key. */
+let loadedVersions = ''
+let versionCheckedAt = 0
+const VERSION_CHECK_MS = 5 * 60 * 1000
 
 export const scheduleIndexStats = {
   trips: 0,
@@ -36,6 +40,10 @@ export const scheduleIndexStats = {
   declaredDateOverridden: 0,
   /** Trips no candidate service date explained at all. */
   unexplainedTrips: 0,
+  /** The active feed versions behind the live index. */
+  feedVersions: '',
+  /** Reloads caused by a new nightly build rather than the date changing. */
+  versionReloads: 0,
 }
 
 /**
@@ -46,10 +54,44 @@ export const scheduleIndexStats = {
  * only "today" makes every owl trip unmatchable for the six hours of the night when the
  * data is scarcest and most interesting.
  */
+
 export async function refresh(force = false): Promise<ScheduleIndex> {
   const today = localDate(Date.now())
-  if (!force && loadedFor === today && index.size > 0) return index
   if (!warehouse.available()) return index
+
+  // Reloading only when the date changes is not enough, and the failure is silent.
+  //
+  // The nightly build lands a new feed version at 03:20, hours after the index loaded for
+  // the day, and this function is called every poll cycle but short-circuits on the date --
+  // so that build was ignored until the next restart. The schedule half of that is mild.
+  // The holiday half is not: the holiday map below is computed only when the index reloads,
+  // and `isHoliday` needs `service_day` rows for the same weekday 7, 14 and 21 days back.
+  // If those arrive with the nightly build, a holiday is undetectable at boot and every
+  // trip that day is filed under the wrong day type.
+  //
+  // Measured, not hypothetical: Labor Day 2026 was filed as an ordinary Monday for sixteen
+  // hours, and only became `DayType.Hol` when an unrelated deploy restarted the process.
+  // Holiday service pooled into the Monday profile is exactly the contamination the
+  // six-value DayType exists to prevent.
+  //
+  // The version is checked on its own timer rather than every cycle, because `refresh` runs
+  // on the poll path and that path must not gain a Postgres round trip every fifteen
+  // seconds. A new build being picked up within five minutes is far more precision than a
+  // once-a-night job needs.
+  let versions = loadedVersions
+  const now = Date.now()
+  if (force || now - versionCheckedAt > VERSION_CHECK_MS) {
+    try {
+      versions = (await warehouse.activeFeedVersions()).join(',')
+      versionCheckedAt = now
+    } catch {
+      // Keep the index we have. A version we cannot read is not a reason to drop trips.
+    }
+  }
+
+  if (!shouldReload({ force, loadedFor, today, loadedVersions, versions, size: index.size })) {
+    return index
+  }
 
   const days: ServiceDate[] = [today, shiftDate(today, -1)]
   try {
@@ -63,11 +105,16 @@ export async function refresh(force = false): Promise<ScheduleIndex> {
     }
     index = new ScheduleIndex(trips)
     loadedFor = today
+    loadedVersions = versions
     loadedAt = Date.now()
     scheduleIndexStats.trips = index.size
     scheduleIndexStats.loadedFor = today
     scheduleIndexStats.loadedAt = loadedAt
     scheduleIndexStats.reloads++
+    if (loadedFor === today && versions !== '' && scheduleIndexStats.feedVersions !== versions) {
+      scheduleIndexStats.versionReloads++
+    }
+    scheduleIndexStats.feedVersions = versions
 
     holidays = new Map()
     await Promise.all(
