@@ -75,8 +75,15 @@ curl -s https://transitapi-production.up.railway.app/health \
 Healthy looks like: `leader: true`, `obs` in the thousands, `admitted` a decent fraction of
 it, `cells` in the thousands, `tiers` with non-zero A1/A2, `err: null`.
 
-Read `learner.streamDepth` too. Growing without bound means the learner is behind and
-observations are being dropped — the correct trade, and still worth knowing.
+**Do not read `learner.streamDepth` as a backlog.** It is `XLEN` on the whole stream, capped
+at 200,000 by `PROFILE_STREAM_MAXLEN`, so it climbs toward that cap and then sits on it
+forever whether the learner is keeping up or not — at roughly 75,000 observations a day it
+will be pinned at `200000` within three days, which looks alarming and means nothing.
+
+The learner cannot realistically fall behind: `eventlog.drain()` takes up to 5,000 entries
+per tick and a 300-second fold accumulates about 260. If you want the true lag it is
+`eventLogStats.appended - drained`, which is **not on `/health` yet** — see the follow-up
+list below.
 
 **Rollback is one variable.** Set `POLL_ENABLED=true` on `baytransit-widgets` and it retakes
 the lease on its next tick. Nothing in this service can affect `/v1/departures`, which is
@@ -100,6 +107,11 @@ Worth doing in that window:
    tuned for the wrong cadence.
 3. **Watch the tier mix in daylight.** If A1+A2 stays near 40% the prediction-error model can
    be trained without circularity for the bus operators.
+4. **Put the real learner lag on `/health`.** `eventLogStats` already tracks `appended` and
+   `drained`; their difference is the actual backlog and nothing exposes it. Deliberately not
+   done tonight, because deploying it restarts the poller and resets every in-memory counter
+   — `tracker.cycles`, `events`, `byTier` — which is exactly the overnight evidence this
+   handover was for. Ship it with the next deploy in daylight.
 
 ## Not done, deliberately
 
