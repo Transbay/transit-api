@@ -9,6 +9,25 @@ import (
 	"time"
 )
 
+// requireGTFS skips when the static archive is not on disk.
+//
+// `data/` is gitignored and populated at runtime, so a fresh checkout has none. The tests
+// below assert against real GTFS, which is the right thing for them to do -- but without
+// this they fail rather than skip, and they fail with a misleading message: the first
+// thing TestStopDepartures checks is that today has active services, so an absent archive
+// reports itself as "calendar parsing is broken".
+//
+// TestEnrichVehiclePositionsTripInfo already skips this way. This just gives the other two
+// the same courtesy, so a red suite means something is actually wrong.
+func requireGTFS(t *testing.T) {
+	t.Helper()
+	for _, f := range []string{"trips.txt", "stop_times.txt", "calendar.txt"} {
+		if _, err := os.Stat(filepath.Join(datafeedsDir, f)); err != nil {
+			t.Skipf("no static GTFS on disk (%s); run the server once to populate data/", f)
+		}
+	}
+}
+
 func TestEnrichVehiclePositionsTripInfo(t *testing.T) {
 	datafeedsDir = filepath.Join("data", "gtfs")
 
@@ -63,9 +82,13 @@ func TestEnrichVehiclePositionsTripInfo(t *testing.T) {
 func TestStopDepartures(t *testing.T) {
 	datafeedsDir = filepath.Join("data", "gtfs")
 
+	// Pure, and worth checking whether or not an archive is present: GTFS times run past
+	// 24:00:00 and mishandling that is silent.
 	if got := parseGTFSSeconds("25:10:05"); got != 25*3600+10*60+5 {
 		t.Fatalf("parseGTFSSeconds(25:10:05) = %d", got)
 	}
+
+	requireGTFS(t)
 
 	now := time.Now().In(loadAgencyTimezone())
 	if len(todaysServiceIDs(now)) == 0 {
@@ -128,6 +151,7 @@ func TestStopDepartures(t *testing.T) {
 
 func TestStopGroups(t *testing.T) {
 	datafeedsDir = filepath.Join("data", "gtfs")
+	requireGTFS(t)
 
 	groups := loadStopGroups()
 	if len(groups) == 0 {
