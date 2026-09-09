@@ -56,9 +56,17 @@ Two things follow from that rule, and both are load-bearing:
 **Served:** every operator the 511 regional feed carries, roughly two dozen. This costs no
 extra requests — both protobufs already contain all of them.
 
-**Profiled:** Muni (SF), BART (BA), Caltrain (CT), SamTrans (SM), Golden Gate Transit (GG).
-Five, because storing a stop-level event for every vehicle at every stop all day is not
-free and there is no reason to pay it for an operator nobody has asked about.
+**Segment-profiled:** Muni (SF), BART (BA), Caltrain (CT), SamTrans (SM), Golden Gate
+Transit (GG). Five, because storing a stop-level event for every vehicle at every stop all
+day is not free. Widening this is planned and staged; the binding constraint is Redis
+memory for the hot profile blobs, not Postgres.
+
+**Drift-profiled: all of them.** How far each operator's own predictions move as an arrival
+closes is measured for every agency in the feed, because that measurement needs no schedule
+and no observation pipeline — only the trip-update stream — and so costs nothing per extra
+operator. See [`drift.ts`](../src/drift.ts). It is what catches a producer whose countdown
+reliably slips twenty seconds in the last half minute, which the segment model cannot see:
+that model compares vehicles against the timetable and never looks at what the agency said.
 
 **Cost against the 511 budget: zero.** The whole historical system learns from bytes we
 already pay for. The only new upstream cost is parsing more of the archive we already

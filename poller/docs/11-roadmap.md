@@ -168,9 +168,21 @@ the thing that explains itself.
 [`07-evaluation.md`](07-evaluation.md); until all five are met, this stays on its own
 endpoint.
 
-**Profiling more agencies.** The cost is per-stop-event storage, and the five chosen are the
-ones the app's users actually save. Adding one is a configuration change and three weeks of
-waiting, not a code change.
+**Profiling more agencies — no longer accurate; see below.** This said the five chosen are
+the ones the app's users actually save. That reasoning held while the only consumer was a
+widget over a handful of saved stops. It stopped holding when `headways` began rendering
+every operator the regional feed carries, because now somebody *has* asked about all
+twenty-four.
+
+The split today is by what a measurement costs, not by which agencies matter:
+
+- **Prediction drift** (`drift.ts` → `prediction_error`) runs for **every agency**. It needs
+  no schedule, no `stop_times` and no observation pipeline — only the trip-update stream —
+  so an extra operator costs nothing and is not gated on `PROFILED_AGENCIES`.
+- **Segment profiles** (`profile.ts` → `segment_profile`) still cost per-stop-event storage
+  and a schedule build, so they remain a configuration change and three weeks of waiting.
+  Widening them is planned, staged largest-operator-first, and bounded by Redis memory for
+  the hot blobs (~51 MB at five agencies) rather than by Postgres.
 
 **Per-user or per-device anything.** This service holds no user data and no request history,
 and the analysis endpoints are open precisely because there is nothing in them to protect.
