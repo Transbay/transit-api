@@ -32,6 +32,7 @@ import { localDate } from './servicedate.js'
 import * as eventlog from './eventlog.js'
 import * as scheduleIndex from './scheduleindex.js'
 import { startLearner, stopLearner } from './learner.js'
+import * as agencyerror from './agencyerror.js'
 import { writeIndex } from './predictions.js'
 import * as warehouse from './warehouse.js'
 import { publishFeeds, reportBridgeFailure } from './bridge.js'
@@ -94,6 +95,10 @@ const deviationTracker = new DeviationTracker()
  * schedule and therefore costs nothing per extra agency.
  */
 const driftTracker = new DriftTracker()
+
+/** How often the learned drift view is rebuilt from Postgres for the prediction path. */
+const AGENCY_ERROR_REFRESH_SECONDS = 300
+let agencyErrorLoadedAt = 0
 
 export function observationStats() {
   return { tracker: tripTracker.stats, deviation: deviationTracker.stats, activeTrips: tripTracker.activeTrips }
@@ -397,6 +402,13 @@ async function driftCycle(tripBuffer: Uint8Array, at: number): Promise<void> {
   const samples = driftTracker.ingest(updates, at, serviceDate)
   if (samples.length === 0) return
   await warehouse.foldDrift(samples)
+
+  // Rebuilt on a timer rather than after every fold: the prediction path reads this view,
+  // and rebuilding it mid-cycle would put a full table scan on the path of a response.
+  if (at - agencyErrorLoadedAt >= AGENCY_ERROR_REFRESH_SECONDS) {
+    agencyErrorLoadedAt = at
+    void agencyerror.refresh()
+  }
 }
 
 async function observeCycle(

@@ -4,6 +4,8 @@ import * as store from './profilestore.js'
 import * as scheduleIndex from './scheduleindex.js'
 import { readBlockState } from './learner.js'
 import { predict, type Prediction } from './predict.js'
+import * as agencyerror from './agencyerror.js'
+import { periodOf } from './drift.js'
 import {
   Level,
   estimate,
@@ -253,6 +255,19 @@ export async function predictionsFor(
             now,
             target,
             agencyPrediction: entry.raw,
+            // How this producer's own estimate typically moves between now and arrival.
+            // Undefined where it has not been measured, which leaves the agency estimator
+            // on its pessimistic default variance — in the fusion, but unable to dominate
+            // it. Where it has been measured, this is what anticipates the late jump
+            // instead of waiting to observe it.
+            agencyError: agencyerror.lookup(
+              agency,
+              trip.routeId,
+              trip.directionId,
+              entry.raw - now,
+              dayType,
+              periodOf(trip.stops[target].departure),
+            ),
             profileFor: (i) => ladderFor(segments, pooled, trip, i, bucket, now),
             block,
             minSamples: config.predictions.minSamples,

@@ -1040,3 +1040,43 @@ export async function foldDrift(samples: DriftSample[]): Promise<number> {
     [...working.values()].map((e) => ({ keys: e.keys, n: e.m.n, mean: e.m.mean, m2: e.m.m2 })),
   )
 }
+
+/** One learned drift cell, as `agencyerror.ts` caches it. */
+export interface DriftCell {
+  agency: string
+  routeId: string
+  directionId: number
+  horizon: number
+  dayType: number
+  period: number
+  n: number
+  mean: number
+  m2: number
+}
+
+/**
+ * Every drift cell with enough evidence to be worth holding.
+ *
+ * Read whole rather than per request. The table is moments only -- six key columns and
+ * three numbers -- so the entire learned set is a few tens of megabytes at most, and the
+ * prediction path must never wait on Postgres.
+ */
+export async function loadDrift(minN = 5): Promise<DriftCell[]> {
+  if (!available()) return []
+  const r = await run<Record<string, never>>(
+    `SELECT agency, route_id, direction_id, horizon, day_type, bucket, n, mean, m2
+       FROM prediction_error WHERE n >= $1`,
+    [minN],
+  )
+  return ((r?.rows ?? []) as unknown as Record<string, unknown>[]).map((row) => ({
+    agency: row.agency as string,
+    routeId: row.route_id as string,
+    directionId: Number(row.direction_id),
+    horizon: Number(row.horizon),
+    dayType: Number(row.day_type),
+    period: Number(row.bucket),
+    n: Number(row.n),
+    mean: Number(row.mean),
+    m2: Number(row.m2),
+  }))
+}

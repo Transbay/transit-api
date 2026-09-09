@@ -19,6 +19,7 @@ import { predictionsFor, indexStatus } from './predictions.js'
 import { learnerStatus } from './learner.js'
 import * as warehouse from './warehouse.js'
 import * as profilestore from './profilestore.js'
+import * as agencyerror from './agencyerror.js'
 import * as scheduleIndex from './scheduleindex.js'
 import {
   issueChallenge,
@@ -341,6 +342,7 @@ export async function registerRoutes(app: FastifyInstance) {
           // means a producer is dropping stops before they arrive, which quietly starves
           // the model of the converged answers it measures against.
           drift: driftStats(),
+          agencyError: agencyerror.status(),
           feed: feedSurvey(),
         },
         budget,
