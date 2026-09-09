@@ -27,6 +27,8 @@ import type { VehicleRecord } from './gtfsrt.js'
 import { decodeTripUpdates, decodeVehicles, countSchedulePassthrough, mergeSurvey, surveyToJSON, type FeedSurvey } from './rtdecode.js'
 import { TripTracker } from './observe.js'
 import { DeviationTracker } from './deviation.js'
+import { DriftTracker } from './drift.js'
+import { localDate } from './servicedate.js'
 import * as eventlog from './eventlog.js'
 import * as scheduleIndex from './scheduleindex.js'
 import { startLearner, stopLearner } from './learner.js'
@@ -84,8 +86,21 @@ export function feedSurvey(): ReturnType<typeof surveyToJSON> {
 const tripTracker = new TripTracker({ profiled: profiledSet() })
 const deviationTracker = new DeviationTracker()
 
+/**
+ * Unscoped, unlike the two above.
+ *
+ * It follows every stop in the regional feed rather than the profiled agencies' stops,
+ * because measuring how a producer's own estimate converges needs nothing from the
+ * schedule and therefore costs nothing per extra agency.
+ */
+const driftTracker = new DriftTracker()
+
 export function observationStats() {
   return { tracker: tripTracker.stats, deviation: deviationTracker.stats, activeTrips: tripTracker.activeTrips }
+}
+
+export function driftStats() {
+  return driftTracker.status()
 }
 
 /** Claims (or renews) the right to poll. */
@@ -318,6 +333,20 @@ async function pollRegional(): Promise<void> {
     }
   }
 
+  // --- prediction drift ----------------------------------------------------
+  // Separate from observation below, and deliberately not inside it: `observeCycle`
+  // returns early without a schedule and filters to the five profiled agencies, and this
+  // measurement needs neither. It reads the trip-update stream alone, so every operator
+  // the regional feed carries is measured — which is the entire point, since the map shows
+  // all of them and the segment profile can only ever afford a handful.
+  if (config.profile.enabled && updates.status === 'fulfilled') {
+    try {
+      await driftCycle(updates.value, Math.floor(startedAt / 1000))
+    } catch (err) {
+      console.error('[poller] drift failed:', (err as Error).message)
+    }
+  }
+
   // --- observation ---------------------------------------------------------
   // Its own try/catch, exactly like BART geometry above and for the same reason: the
   // historical system is an enhancement, and a throw in it must never cost the other
@@ -346,6 +375,30 @@ async function pollRegional(): Promise<void> {
  * symptom -- a model that scores beautifully and predicts badly -- is among the hardest
  * kinds of wrong to notice.
  */
+/**
+ * Measures how each agency's own predictions move as arrivals close.
+ *
+ * The `null` agency filter is the whole design decision. Everything else in the learning
+ * path is scoped to `PROFILED_AGENCIES`, because a stop-level observation costs schedule
+ * rows and profile cells per agency and there is no point paying that for an operator
+ * nobody asked about. This costs neither -- it needs no schedule at all -- so it is scoped
+ * to nothing and covers every operator in the feed.
+ *
+ * The service date is approximated by shifting three hours back rather than resolved
+ * against the calendar, because resolving it properly would reintroduce the schedule
+ * dependency this measurement exists without. The shift is the standard transit
+ * convention and puts owl trips on the day they belong to; the cost is that a genuine
+ * 03:00 boundary case lands in a neighbouring three-hour period, which is well inside the
+ * resolution this model claims.
+ */
+async function driftCycle(tripBuffer: Uint8Array, at: number): Promise<void> {
+  const { updates } = decodeTripUpdates(tripBuffer, null)
+  const serviceDate = localDate((at - 3 * 3600) * 1000)
+  const samples = driftTracker.ingest(updates, at, serviceDate)
+  if (samples.length === 0) return
+  await warehouse.foldDrift(samples)
+}
+
 async function observeCycle(
   tripBuffer: Uint8Array,
   vehicleBuffer: Uint8Array | null,

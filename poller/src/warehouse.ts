@@ -5,6 +5,8 @@ import pg from 'pg'
 import { config } from './config.js'
 import { timepointsAreInformative, type TripSchedule } from './schedule.js'
 import { shiftDate, localDate, type ServiceDate } from './servicedate.js'
+import { observe, emptyMoments, type Moments } from './stats.js'
+import type { DriftSample } from './drift.js'
 
 /**
  * The warehouse.
@@ -989,4 +991,52 @@ export async function profiledRoutes(): Promise<
     directionId: row.direction_id as number,
     dayType: row.day_type as number,
   }))
+}
+
+/**
+ * Folds prediction-drift samples into `prediction_error`.
+ *
+ * Same read-modify-write shape as the learner's ladder fold, and deliberately the same
+ * decay: a producer that changed its prediction algorithm six months ago should not still
+ * be judged on how it behaved then.
+ *
+ * Lives here rather than in `learner.ts` because it is not gated on the learner at all.
+ * The learner runs every five minutes over the profiled agencies' observation stream;
+ * this runs every cycle over every agency in the feed, and needs no schedule to do it.
+ */
+export async function foldDrift(samples: DriftSample[]): Promise<number> {
+  if (!available() || samples.length === 0) return 0
+
+  const at = Math.floor(Date.now() / 1000)
+  const keysOf = (s: DriftSample): (string | number)[] => [
+    s.agency,
+    s.routeId,
+    s.directionId,
+    s.horizon,
+    s.dayType,
+    s.period,
+  ]
+
+  const existing = await loadMoments('prediction_error', samples.map(keysOf))
+  const working = new Map<string, { keys: (string | number)[]; m: Moments }>()
+
+  for (const s of samples) {
+    const keys = keysOf(s)
+    const id = momentKey('prediction_error', keys)
+    let entry = working.get(id)
+    if (!entry) {
+      const prior = existing.get(id)
+      entry = {
+        keys,
+        m: prior ? { n: prior.n, mean: prior.mean, m2: prior.m2, updatedAt: 0 } : emptyMoments(0),
+      }
+      working.set(id, entry)
+    }
+    entry.m = observe(entry.m, s.drift, at, 1, config.profile.halfLifeDays)
+  }
+
+  return saveMoments(
+    'prediction_error',
+    [...working.values()].map((e) => ({ keys: e.keys, n: e.m.n, mean: e.m.mean, m2: e.m.m2 })),
+  )
 }

@@ -6,7 +6,7 @@ import { NoKeyAvailableError, BudgetUnavailableError, budgetSnapshot } from './k
 import { verifyAttestation, AttestationError } from './attest.js'
 import { readSnapshot, snapshotStatus, readVehicles } from './snapshot.js'
 import { staticStatus } from './gtfs.js'
-import { bartSynthesisStatus, observationStats, feedSurvey } from './poller.js'
+import { bartSynthesisStatus, observationStats, driftStats, feedSurvey } from './poller.js'
 import { bartBreakerStatus } from './bart.js'
 import { bridgeStatus } from './bridge.js'
 import { registerBartBoard } from './bartboard.js'
@@ -336,6 +336,11 @@ export async function registerRoutes(app: FastifyInstance) {
           hotProfile: hot,
           predictionIndex: predIndex,
           observation: observationStats(),
+          // Unlike everything else under `profile`, this covers every agency in the feed
+          // rather than the profiled five. `abandoned` climbing relative to `emitted`
+          // means a producer is dropping stops before they arrive, which quietly starves
+          // the model of the converged answers it measures against.
+          drift: driftStats(),
           feed: feedSurvey(),
         },
         budget,
