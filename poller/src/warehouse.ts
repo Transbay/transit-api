@@ -873,7 +873,7 @@ const MOMENT_TABLES: Record<string, string[]> = {
   route_profile: ['agency', 'route_id', 'direction_id', 'day_type', 'bucket'],
   agency_profile: ['agency', 'day_type', 'bucket'],
   start_profile: ['agency', 'route_id', 'direction_id', 'day_type', 'bucket'],
-  prediction_error: ['agency', 'route_id', 'direction_id', 'horizon', 'day_type', 'bucket'],
+  prediction_error: ['source', 'agency', 'route_id', 'direction_id', 'horizon', 'day_type', 'bucket'],
   stop_hold_profile: ['agency', 'route_id', 'direction_id', 'stop_id'],
 }
 
@@ -1009,6 +1009,9 @@ export async function foldDrift(samples: DriftSample[]): Promise<number> {
 
   const at = Math.floor(Date.now() / 1000)
   const keysOf = (s: DriftSample): (string | number)[] => [
+    // Drift, not measured error. The two share this table's shape and must never share a
+    // cell: one grades a producer against its own last word, the other against reality.
+    'drift',
     s.agency,
     s.routeId,
     s.directionId,
@@ -1065,7 +1068,7 @@ export async function loadDrift(minN = 5): Promise<DriftCell[]> {
   if (!available()) return []
   const r = await run<Record<string, never>>(
     `SELECT agency, route_id, direction_id, horizon, day_type, bucket, n, mean, m2
-       FROM prediction_error WHERE n >= $1`,
+       FROM prediction_error WHERE source = 'drift' AND n >= $1`,
     [minN],
   )
   return ((r?.rows ?? []) as unknown as Record<string, unknown>[]).map((row) => ({
