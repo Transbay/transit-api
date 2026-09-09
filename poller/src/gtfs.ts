@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs'
-import { mkdtemp, rm, open as openFile, truncate } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, copyFile, stat, open as openFile, truncate } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -346,6 +346,39 @@ function stripAgency(id: string): string {
  * Returns the number of trips indexed, or throws. Callers treat a throw as "keep
  * yesterday's tables" — stale names are survivable, missing ones are not.
  */
+/**
+ * Where the downloaded archive is kept for other services to read.
+ *
+ * The Go server needs the same regional archive for shapes, stop_times and stop groups
+ * across all twenty-four operators -- data this service only warehouses for the profiled
+ * five. Rather than have it spend a second 511 request on the identical bytes, the copy we
+ * already paid for is retained and served on the private network.
+ *
+ * One file, overwritten in place. It is the same archive every time and there is no reason
+ * to keep two.
+ */
+const ARCHIVE_DIR = join(tmpdir(), 'transitapi-archive')
+const ARCHIVE_PATH = join(ARCHIVE_DIR, 'regional.zip')
+
+/**
+ * The retained archive, or null if there is none.
+ *
+ * Age comes from the file's own mtime rather than from a variable set at download time, so
+ * a copy survives a restart of this process. That is not a detail: the nightly build runs
+ * once a day, so remembering it in memory would mean every redeploy left this endpoint
+ * refusing for up to twenty-four hours while a perfectly good archive sat on disk, and the
+ * consumer spent a 511 request a day to work around it.
+ */
+export async function retainedArchive(): Promise<{ path: string; at: number; bytes: number } | null> {
+  try {
+    const info = await stat(ARCHIVE_PATH)
+    if (info.size === 0) return null
+    return { path: ARCHIVE_PATH, at: Math.floor(info.mtimeMs / 1000), bytes: info.size }
+  } catch {
+    return null
+  }
+}
+
 export async function loadStaticGTFS(): Promise<{
   trips: number
   stops: number
@@ -360,6 +393,18 @@ export async function loadStaticGTFS(): Promise<{
     const body = await fetchUpstreamRaw('datafeeds', { operator_id: 'RG' })
     await pipeline(Readable.fromWeb(body as never), createWriteStream(zipPath))
     await trimTrailingBytes(zipPath)
+
+    // Retained before parsing, not after: if a malformed archive throws halfway through
+    // the CSV pass we still want the bytes on disk to look at, and a consumer reading a
+    // trimmed-but-unparsed archive is no worse off than one reading nothing.
+    try {
+      await mkdir(ARCHIVE_DIR, { recursive: true })
+      await copyFile(zipPath, ARCHIVE_PATH)
+    } catch (err) {
+      // Never fatal. This copy exists for another service's convenience; failing to make
+      // it costs that service one 511 request a day and costs this one nothing.
+      console.warn('[gtfs] could not retain archive copy:', (err as Error).message)
+    }
 
     // --- routes: id -> badge -------------------------------------------------
     const routeBadge = new Map<string, string>()

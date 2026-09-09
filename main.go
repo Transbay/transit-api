@@ -44,7 +44,11 @@ const (
 	// map could look.
 	vehiclePositionsCacheInterval = 5 * time.Second
 	tripUpdatesCacheInterval      = 5 * time.Second
-	datafeedsRefreshInterval      = 1 * time.Hour
+	// Daily, not hourly. 511 publishes a service change a few times a year, so twenty-four
+	// downloads a day of an unchanged sixty-megabyte archive bought nothing and cost a
+	// full re-parse and cache invalidation each time. The poller rebuilds nightly on the
+	// same cadence, so this now tracks it.
+	datafeedsRefreshInterval = 24 * time.Hour
 
 	// The tick rate above is only safe because it usually costs a Redis read. A bridge
 	// outage falls back to 511, and 511 is rate limited per key per hour — at five
@@ -1060,16 +1064,38 @@ func datafeedsGTFSFileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// downloadDatafeed fetches the regional GTFS archive.
+//
+// Prefers the poller's retained copy over 511. It is the same archive, downloaded by the
+// service that already pays a request for it every night — so pointing at it turns two
+// downloads a day into one and removes the last reason this server needs a 511 key at all.
+//
+// Falls back to 511 whenever the poller has no copy yet, which is the normal state for the
+// first few minutes after a fresh deploy of both services.
 func downloadDatafeed(destination string) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+	client := &http.Client{Timeout: 120 * time.Second}
+
+	if archiveURL := os.Getenv("GTFS_ARCHIVE_URL"); archiveURL != "" {
+		if err := downloadFrom(client, archiveURL, destination); err == nil {
+			log.Printf("datafeeds: fetched the poller's retained archive")
+			return nil
+		} else {
+			log.Printf("datafeeds: poller archive unavailable (%v); falling back to 511", err)
+		}
+	}
+
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
 		return fmt.Errorf("API_KEY env var is not set")
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return fmt.Errorf("failed to create data directory: %w", err)
-	}
-	client := &http.Client{Timeout: 60 * time.Second}
 	url := fmt.Sprintf("%s?api_key=%s&operator_id=%s", datafeedsBase, apiKey, operatorParam)
+	return downloadFrom(client, url, destination)
+}
+
+func downloadFrom(client *http.Client, url, destination string) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)

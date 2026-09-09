@@ -1,3 +1,4 @@
+import { createReadStream } from 'node:fs'
 import type { FastifyInstance } from 'fastify'
 import { config } from './config.js'
 import { cached } from './cache.js'
@@ -5,7 +6,7 @@ import { fetchUpstream, UpstreamError } from './upstream.js'
 import { NoKeyAvailableError, BudgetUnavailableError, budgetSnapshot } from './keypool.js'
 import { verifyAttestation, AttestationError } from './attest.js'
 import { readSnapshot, snapshotStatus, readVehicles } from './snapshot.js'
-import { staticStatus } from './gtfs.js'
+import { staticStatus, retainedArchive } from './gtfs.js'
 import { bartSynthesisStatus, observationStats, driftStats, feedSurvey } from './poller.js'
 import { bartBreakerStatus } from './bart.js'
 import { bridgeStatus } from './bridge.js'
@@ -277,6 +278,32 @@ export async function registerRoutes(app: FastifyInstance) {
   // prefers static segments regardless of order, registering it after everything else
   // means the precedence is obvious to a reader rather than a property they must know.
   await registerBoard(app)
+
+  /**
+   * The regional GTFS archive this service already downloaded, for the Go server.
+   *
+   * It needs shapes, stop_times and stop groups for all twenty-four operators, which this
+   * service only warehouses for the profiled five -- so it cannot read them out of
+   * Postgres and would otherwise spend its own 511 request on the identical bytes. This
+   * turns two downloads a day into one.
+   *
+   * Deliberately not authenticated, and deliberately named `/internal`: it publishes only
+   * what 511 publishes to anyone with a key, and it is reachable on Railway's private
+   * network. If it is ever exposed publicly the worst case is bandwidth, not disclosure --
+   * but it should not be exposed publicly.
+   */
+  app.get('/internal/gtfs.zip', async (_request, reply) => {
+    const archive = await retainedArchive()
+    if (!archive) {
+      // No copy yet -- the nightly build has not run since boot. 503 rather than 404, so
+      // the consumer treats it as "try again or fall back" rather than "this is gone".
+      return reply.code(503).send({ error: 'no archive retained yet' })
+    }
+    reply.header('content-type', 'application/zip')
+    reply.header('content-length', String(archive.bytes))
+    reply.header('x-archive-age', String(Math.floor(Date.now() / 1000) - archive.at))
+    return reply.send(createReadStream(archive.path))
+  })
 
   app.get('/health', async () => {
     try {
