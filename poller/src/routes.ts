@@ -8,6 +8,7 @@ import { readSnapshot, snapshotStatus, readVehicles } from './snapshot.js'
 import { staticStatus } from './gtfs.js'
 import { bartSynthesisStatus, observationStats, feedSurvey } from './poller.js'
 import { bartBreakerStatus } from './bart.js'
+import { bridgeStatus } from './bridge.js'
 import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
@@ -307,6 +308,10 @@ export async function registerRoutes(app: FastifyInstance) {
           breaker: bartBreakerStatus(),
           synthesis: bartSynthesisStatus(),
         },
+        // What headways is reading. `failures` is the one to alert on: the map keeps
+        // rendering happily on whatever it fetched last, so a broken bridge looks like
+        // working software until someone notices the buses have stopped moving.
+        bridge: bridgeStatus(),
         // Whether the maps will draw, and why not if they will not. The key id is
         // truncated: it is not a secret, but a health endpoint is not the place to
         // publish credentials-adjacent identifiers in full.

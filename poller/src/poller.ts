@@ -32,6 +32,7 @@ import * as scheduleIndex from './scheduleindex.js'
 import { startLearner, stopLearner } from './learner.js'
 import { writeIndex } from './predictions.js'
 import * as warehouse from './warehouse.js'
+import { publishFeeds, reportBridgeFailure } from './bridge.js'
 
 /** Keeps every agency's departures current, on a schedule of our choosing. */
 
@@ -174,6 +175,23 @@ async function pollRegional(): Promise<void> {
     lastEtd && Date.now() - lastEtdAt <= config.bart.etdIntervalSeconds * 2000
       ? lastEtd
       : null
+
+  // --- bridge --------------------------------------------------------------
+  // Republished first, and unmodified, so headways sees this cycle's bytes at the same
+  // moment we do rather than after the work below. Its own try/catch for the usual
+  // reason: a Redis hiccup on the bridge costs the map fifteen seconds of freshness and
+  // must never cost the other twenty-three operators their snapshot.
+  if (config.bridge.enabled) {
+    try {
+      await publishFeeds(
+        vehicles.status === 'fulfilled' ? vehicles.value : null,
+        updates.status === 'fulfilled' ? updates.value : null,
+        new Date(startedAt),
+      )
+    } catch (err) {
+      reportBridgeFailure('publishFeeds', err)
+    }
+  }
 
   // Vehicles from every source are collected and written once, so that a failure in
   // one source never clears the other's agencies.

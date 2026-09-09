@@ -301,6 +301,47 @@ export const config = {
   },
 
   /**
+   * The bridge to the Go `headways-server`, which reads these keys instead of polling
+   * 511 itself.
+   *
+   * Additive in the same sense the profile is: every write is wrapped, none of it sits on
+   * the path of a response, and turning it off returns this service to exactly what it
+   * was. The one rule that matters is that `hw:vp` and `hw:tu` carry the **unmodified**
+   * 511 protobuf. The consumer's `proto.Unmarshal` is the contract, so reshaping those
+   * bytes is a new key and a version bump, never an edit.
+   */
+  bridge: {
+    enabled: optional('BRIDGE_ENABLED', 'false') === 'true',
+    /**
+     * Which region these feeds represent. `sfbay` is the only producer today; SacRT and
+     * Elk Grove would write their own keys under the same scheme rather than needing a
+     * different one.
+     */
+    region: optional('BRIDGE_REGION', 'sfbay'),
+    /**
+     * Whether to publish corrected departure times alongside the raw feeds.
+     *
+     * Separate from `enabled` on purpose: swapping where headways gets its bytes, and
+     * changing what those bytes *say*, are two different risks and should be reversible
+     * independently.
+     */
+    corrections: optional('BRIDGE_CORRECTIONS', 'false') === 'true',
+    /**
+     * Lower than the snapshot TTL. A stale departure board is a nuisance; a stale vehicle
+     * position is a bus drawn on a street it left ten minutes ago, so these expire rather
+     * than linger.
+     */
+    ttlSeconds: Number(optional('BRIDGE_TTL_SECONDS', '90')),
+    /**
+     * Only corrections this confident reach the map. Below it the agency's own number is
+     * left alone, so the bridge can never make a displayed time worse than it is today.
+     */
+    minConfidence: optional('BRIDGE_MIN_CONFIDENCE', 'medium'),
+    /** Bumped when the shape of any bridge key changes. Consumers refuse what they don't know. */
+    version: 1,
+  },
+
+  /**
    * Multiplier on each TTL for the "stale" copy we keep as a safety net. A stop's
    * departures stay fresh for 25s but remain *servable* for 25 * 20 = ~8 minutes,
    * so an upstream outage degrades the widget instead of breaking it.
