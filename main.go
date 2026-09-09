@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"compress/zlib"
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,9 +37,24 @@ const (
 )
 
 const (
-	vehiclePositionsCacheInterval = 1 * time.Minute
-	tripUpdatesCacheInterval      = 1 * time.Minute
+	// Five seconds, not a minute, because over the bridge a refresh is a Redis read
+	// rather than a 511 request. The poller republishes every fifteen seconds, so this
+	// keeps worst-case staleness near twenty seconds instead of sixty — and the client
+	// polls us every ten, so a minute was always the binding constraint on how fresh the
+	// map could look.
+	vehiclePositionsCacheInterval = 5 * time.Second
+	tripUpdatesCacheInterval      = 5 * time.Second
 	datafeedsRefreshInterval      = 1 * time.Hour
+
+	// The tick rate above is only safe because it usually costs a Redis read. A bridge
+	// outage falls back to 511, and 511 is rate limited per key per hour — at five
+	// seconds that path would fire 720 requests an hour against a limit of sixty, exhaust
+	// the key within minutes, and take the poller's shared budget down with it.
+	//
+	// So the fallback keeps its own floor, which is the cadence this server used before
+	// the bridge existed. Ticking fast and fetching slow is the point: freshness when the
+	// bridge is up, the old behaviour exactly when it is not.
+	directFetchMinInterval = 1 * time.Minute
 )
 
 var (
@@ -105,6 +122,7 @@ func main() {
 	} else {
 		defer closeMongoDB()
 	}
+	initBridge()
 	if os.Getenv("LOCATIONS_API_KEY") == "" {
 		log.Fatalln("LOCATIONS_API_KEY not set")
 	}
@@ -133,6 +151,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api", graphQLHandler)
+	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/images/upload", createImageHandler)
 	mux.HandleFunc("/api/images/vehicle/{vehicle_id}", vehicleImagesHandler)
 	mux.HandleFunc("/api/images/file/{id}", serveImageFileHandler)
@@ -150,8 +169,9 @@ func main() {
 			h.ServeHTTP(w, r)
 		})
 	}
+	port := envOr("PORT", "8081")
 	server := &http.Server{
-		Addr:              ":8081",
+		Addr:              ":" + port,
 		Handler:           corsHandler(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -160,7 +180,7 @@ func main() {
 			log.Fatalf("failed to load datafeeds: %v", err)
 		}
 	}()
-	log.Println("listening on :8081")
+	log.Printf("listening on :%s", port)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -193,42 +213,22 @@ func tripUpdatesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func runTripUpdatesRefresher() {
-	if err := refreshTripUpdates(); err != nil {
+	if err := refreshTripUpdates(); err != nil && !errors.Is(err, errSkipCycle) {
 		log.Printf("trip updates refresh failed: %v", err)
 	}
 	ticker := time.NewTicker(tripUpdatesCacheInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if err := refreshTripUpdates(); err != nil {
+		if err := refreshTripUpdates(); err != nil && !errors.Is(err, errSkipCycle) {
 			log.Printf("trip updates refresh failed: %v", err)
 		}
 	}
 }
 
 func refreshTripUpdates() error {
-	apiKey := os.Getenv("TRIP_UPDATES_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("TRIP_UPDATES_API_KEY env var is not set")
-	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	url := fmt.Sprintf("%s?api_key=%s&agency=%s", baseURL, apiKey, agencyParam)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	body, fetchedAt, err := fetchFeedBytes("tu", baseURL, "TRIP_UPDATES_API_KEY", "trip updates")
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Accept", "application/x-protobuf")
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to fetch trip updates: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upstream error: %s", string(body))
-	}
-	body, err := readResponseBody(resp)
-	if err != nil {
-		return fmt.Errorf("failed to read upstream response: %w", err)
+		return err
 	}
 	var feed gtfs.FeedMessage
 	if err := proto.Unmarshal(body, &feed); err != nil {
@@ -243,7 +243,7 @@ func refreshTripUpdates() error {
 	tripUpdatesCacheMu.Lock()
 	tripUpdatesCachePayload = payload
 	tripUpdatesCacheErr = nil
-	tripUpdatesCacheTime = time.Now()
+	tripUpdatesCacheTime = fetchedAt
 	tripUpdatesCacheMu.Unlock()
 	return nil
 }
@@ -317,7 +317,23 @@ func enrichVehiclePositions(payload []byte) []byte {
 						if st.stop_id == stopID {
 							scheduledSec := parseGTFSSeconds(st.departure_time)
 							delay := nowSec - scheduledSec
-							if pred, ok := bayAreaTripUpdates.predictedDeparture(tripID, stopID); ok {
+							// Three sources, best first: a learned correction, the
+							// agency's own prediction, then the bare schedule.
+							//
+							// The correction is the agency's number adjusted by what this
+							// segment actually does at this hour on this day type, and it
+							// only appears here once it has cleared a confidence floor —
+							// so this can improve the figure but never degrade it below
+							// what the previous two lines already produced.
+							//
+							// `delay` keeps its exact meaning and units either way, which
+							// is what lets the client's timeliness colouring and the Live
+							// Activity pick this up with no change of their own.
+							pred, ok := correctedDeparture(tripID, stopID)
+							if !ok {
+								pred, ok = bayAreaTripUpdates.predictedDeparture(tripID, stopID)
+							}
+							if ok {
 								p := time.Unix(pred, 0).In(loc)
 								delay = (p.Hour()*3600 + p.Minute()*60 + p.Second()) - scheduledSec
 							}
@@ -518,43 +534,107 @@ func blockScheduleHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func runVehiclePositionsRefresher() {
-	if err := refreshVehiclePositions(); err != nil {
+	if err := refreshVehiclePositions(); err != nil && !errors.Is(err, errSkipCycle) {
 		log.Printf("vehicle positions refresh failed: %v", err)
 	}
 	ticker := time.NewTicker(vehiclePositionsCacheInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if err := refreshVehiclePositions(); err != nil {
+		if err := refreshVehiclePositions(); err != nil && !errors.Is(err, errSkipCycle) {
 			log.Printf("vehicle positions refresh failed: %v", err)
 		}
 	}
 }
 
-func refreshVehiclePositions() error {
-	apiKey := os.Getenv("LOCATIONS_API_KEY")
+// errSkipCycle means "nothing to do this tick" — the bridge is down and the direct 511
+// fallback is not due yet. Distinct from a real error so the refreshers do not log a
+// failure every five seconds for what is a deliberate, healthy no-op.
+var errSkipCycle = errors.New("skipping cycle")
+
+var (
+	directFetchMu sync.Mutex
+	directFetchAt = map[string]time.Time{}
+)
+
+// claimDirectFetch reports whether a direct 511 fetch for this feed is due, and records
+// it if so. One caller wins per interval; the rest wait.
+func claimDirectFetch(kind string) bool {
+	directFetchMu.Lock()
+	defer directFetchMu.Unlock()
+	if last, ok := directFetchAt[kind]; ok && time.Since(last) < directFetchMinInterval {
+		return false
+	}
+	directFetchAt[kind] = time.Now()
+	return true
+}
+
+// fetchFeedBytes returns one GTFS-realtime feed as protobuf, from the bridge if it is
+// serving and from 511 otherwise.
+//
+// The two sources are interchangeable by design: the bridge republishes 511's bytes
+// unmodified, so everything downstream of this function is identical either way. Which
+// one answered is a log line, not a behaviour.
+func fetchFeedBytes(kind, feedURL, keyEnv, what string) ([]byte, time.Time, error) {
+	if bridge.enabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		body, fetchedAt, err := bridgeFeed(ctx, kind)
+		cancel()
+		if err == nil {
+			return body, fetchedAt, nil
+		}
+		if !bridge.fallback {
+			return nil, time.Time{}, fmt.Errorf("%s unavailable and fallback is off: %w", what, err)
+		}
+		// Throttled to the pre-bridge cadence. The ticker runs at five seconds because a
+		// bridge read is free; going to 511 at that rate would burn an hour's key budget
+		// in five minutes and take the poller down with it.
+		if !claimDirectFetch(kind) {
+			return nil, time.Time{}, errSkipCycle
+		}
+		// Loud, because this is spending 511 budget the bridge exists to stop spending.
+		// A steady trickle of these is a broken bridge wearing working software's face.
+		log.Printf("bridge: falling back to 511 for %s: %v", what, err)
+	}
+
+	apiKey := os.Getenv(keyEnv)
 	if apiKey == "" {
-		return fmt.Errorf("LOCATIONS_API_KEY not set")
+		return nil, time.Time{}, fmt.Errorf("%s not set", keyEnv)
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	url := fmt.Sprintf("%s?api_key=%s&agency=%s", vehiclePositionsURL, apiKey, agencyParam)
+	url := fmt.Sprintf("%s?api_key=%s&agency=%s", feedURL, apiKey, agencyParam)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, time.Time{}, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/x-protobuf")
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to fetch vehicle positions: %w", err)
+		return nil, time.Time{}, fmt.Errorf("failed to fetch %s: %w", what, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upstream error: %s", string(body))
+		return nil, time.Time{}, fmt.Errorf("upstream error: %s", string(body))
 	}
 	body, err := readResponseBody(resp)
 	if err != nil {
-		return fmt.Errorf("failed to read upstream response: %w", err)
+		return nil, time.Time{}, fmt.Errorf("failed to read upstream response: %w", err)
 	}
+	return body, time.Now(), nil
+}
+
+func refreshVehiclePositions() error {
+	body, fetchedAt, err := fetchFeedBytes("vp", vehiclePositionsURL, "LOCATIONS_API_KEY", "vehicle positions")
+	if err != nil {
+		return err
+	}
+
+	// Corrections are refreshed alongside the positions they will be applied to, so a
+	// vehicle and the correction attached to it come from the same instant.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	refreshCorrections(ctx)
+	cancel()
+
 	var feed gtfs.FeedMessage
 	if err := proto.Unmarshal(body, &feed); err != nil {
 		return fmt.Errorf("invalid GTFS-realtime protobuf from upstream: %w", err)
@@ -565,7 +645,9 @@ func refreshVehiclePositions() error {
 		return fmt.Errorf("failed to encode response: %w", err)
 	}
 	payload := enrichVehiclePositions(marshaled)
-	setVehiclePositionsCache(payload, time.Now())
+	// The upstream fetch time, not the moment we read it. Over the bridge those differ by
+	// up to a poll interval, and `fetchedAt` is what the client shows as data age.
+	setVehiclePositionsCache(payload, fetchedAt)
 	vehiclePositionsCacheMu.Lock()
 	vehiclePositionsCacheErr = nil
 	vehiclePositionsCacheMu.Unlock()
