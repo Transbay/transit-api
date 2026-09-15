@@ -1,15 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"image/jpeg"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/image/draw"
+	"golang.org/x/image/webp"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
@@ -38,6 +48,47 @@ func uploadableContentType(ct string) bool {
 		return true
 	}
 	return false
+}
+
+const (
+	maxImageWidth  = 320
+	maxImageHeight = 180
+)
+
+// resizeImage downscales (never upscales) an image to fit within
+// 320x180, preserving aspect ratio. It returns the original bytes unchanged
+// when the image is already small enough; otherwise the result is JPEG.
+func resizeImage(data []byte, contentType string) ([]byte, string, error) {
+	var img image.Image
+	var err error
+	if strings.EqualFold(contentType, "image/webp") {
+		img, err = webp.Decode(bytes.NewReader(data))
+	} else {
+		img, _, err = image.Decode(bytes.NewReader(data))
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	b := img.Bounds()
+	if b.Dx() <= maxImageWidth && b.Dy() <= maxImageHeight {
+		return data, contentType, nil
+	}
+	scale := math.Min(float64(maxImageWidth)/float64(b.Dx()), float64(maxImageHeight)/float64(b.Dy()))
+	w := int(math.Round(float64(b.Dx()) * scale))
+	h := int(math.Round(float64(b.Dy()) * scale))
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), img, b, draw.Over, nil)
+	buf := &bytes.Buffer{}
+	if err := jpeg.Encode(buf, dst, &jpeg.Options{Quality: 82}); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), "image/jpeg", nil
 }
 
 type createImageRequest struct {
@@ -132,6 +183,11 @@ func createImageHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		contentType = header.Header.Get("Content-Type")
+		imageData, contentType, err = resizeImage(imageData, contentType)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to process image: %v", err), http.StatusUnprocessableEntity)
+			return
+		}
 		hasFile = true
 	} else {
 		var req createImageRequest
