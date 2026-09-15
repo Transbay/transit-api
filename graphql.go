@@ -678,8 +678,8 @@ func resolveTripDetail(p graphql.ResolveParams) (interface{}, error) {
 		schedule = append(schedule, map[string]interface{}{
 			"stop_id":        st.stop_id,
 			"stop_sequence":  st.stop_sequence,
-			"arrival_time":   st.arrival_time,
-			"departure_time": st.departure_time,
+			"arrival_time":   gtfsTimeString(st.arrival_time),
+			"departure_time": gtfsTimeString(st.departure_time),
 			"stop_name":      stop.stop_name,
 			"stop_lat":       stop.stop_lat,
 			"stop_lon":       stop.stop_lon,
@@ -770,8 +770,8 @@ func seattleTripDetail(tripID string) (interface{}, error) {
 		schedule = append(schedule, map[string]interface{}{
 			"stop_id":        st.stop_id,
 			"stop_sequence":  st.stop_sequence,
-			"arrival_time":   st.arrival_time,
-			"departure_time": st.departure_time,
+			"arrival_time":   gtfsTimeString(st.arrival_time),
+			"departure_time": gtfsTimeString(st.departure_time),
 			"stop_name":      stop.stop_name,
 			"stop_lat":       stop.stop_lat,
 			"stop_lon":       stop.stop_lon,

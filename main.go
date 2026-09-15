@@ -327,7 +327,7 @@ func enrichVehiclePositions(payload []byte) []byte {
 					stopTimes := loadStopTimesForTrip(tripID)
 					for _, st := range stopTimes {
 						if st.stop_id == stopID {
-							scheduledSec := parseGTFSSeconds(st.departure_time)
+							scheduledSec := st.departure_time
 							delay := nowSec - scheduledSec
 							if pred, ok := bayAreaTripUpdates.predictedDeparture(tripID, stopID); ok {
 								p := time.Unix(pred, 0).In(loc)
@@ -838,16 +838,16 @@ func tripDetailHandler(w http.ResponseWriter, r *http.Request) {
 	schedule := make([]map[string]interface{}, 0, len(times))
 	for _, st := range times {
 		stop := stops[st.stop_id]
-		entry := map[string]interface{}{
-			"stop_id":        st.stop_id,
-			"stop_sequence":  st.stop_sequence,
-			"arrival_time":   st.arrival_time,
-			"departure_time": st.departure_time,
-			"stop_name":      stop.stop_name,
-			"stop_lat":       stop.stop_lat,
-			"stop_lon":       stop.stop_lon,
-		}
-		schedule = append(schedule, entry)
+entry := map[string]interface{}{
+				"stop_id":        st.stop_id,
+				"stop_sequence":  st.stop_sequence,
+				"arrival_time":   gtfsTimeString(st.arrival_time),
+				"departure_time": gtfsTimeString(st.departure_time),
+				"stop_name":      stop.stop_name,
+				"stop_lat":       stop.stop_lat,
+				"stop_lon":       stop.stop_lon,
+			}
+			schedule = append(schedule, entry)
 	}
 	var shapeCoords [][2]float64
 	if trip.shape_id != "" {
@@ -1207,18 +1207,18 @@ func precomputeActiveTripDetails(activeTripIDs []string) {
 		schedule := make([]map[string]interface{}, 0, len(times))
 		for _, st := range times {
 			stop := stops[st.stop_id]
-			entry := map[string]interface{}{
-				"stop_id":        st.stop_id,
-				"stop_sequence":  st.stop_sequence,
-				"arrival_time":   st.arrival_time,
-				"departure_time": st.departure_time,
-				"stop_name":      stop.stop_name,
-				"stop_lat":       stop.stop_lat,
-				"stop_lon":       stop.stop_lon,
-			}
-			schedule = append(schedule, entry)
+entry := map[string]interface{}{
+			"stop_id":        st.stop_id,
+			"stop_sequence":  st.stop_sequence,
+			"arrival_time":   gtfsTimeString(st.arrival_time),
+			"departure_time": gtfsTimeString(st.departure_time),
+			"stop_name":      stop.stop_name,
+			"stop_lat":       stop.stop_lat,
+			"stop_lon":       stop.stop_lon,
 		}
-		result := map[string]interface{}{
+		schedule = append(schedule, entry)
+	}
+	result := map[string]interface{}{
 			"trip_id":         trip.trip_id,
 			"route_id":        trip.route_id,
 			"service_id":      trip.service_id,
@@ -1541,9 +1541,8 @@ type TripInfo struct {
 	trip_end_time         string
 }
 type StopTimeInfo struct {
-	trip_id        string
-	arrival_time   string
-	departure_time string
+	arrival_time   int // seconds since midnight; -1 = no time scheduled
+	departure_time int // seconds since midnight; -1 = no time scheduled
 	stop_id        string
 	stop_sequence  int
 }
@@ -1776,8 +1775,8 @@ func loadTripsData() map[string]TripInfo {
 		for tid, times := range *stm {
 			if len(times) > 0 {
 				if trip, ok := trips[tid]; ok {
-					trip.trip_start_time = times[0].departure_time
-					trip.trip_end_time = times[len(times)-1].arrival_time
+					trip.trip_start_time = gtfsTimeString(times[0].departure_time)
+					trip.trip_end_time = gtfsTimeString(times[len(times)-1].arrival_time)
 					trips[tid] = trip
 				}
 			}
@@ -1856,9 +1855,8 @@ func loadStopTimesForTrip(tripID string) []StopTimeInfo {
 			fmt.Sscanf(s, "%d", &seq)
 		}
 		st[tid] = append(st[tid], StopTimeInfo{
-			trip_id:        tid,
-			arrival_time:   get("arrival_time", rec),
-			departure_time: get("departure_time", rec),
+			arrival_time:   gtfsSeconds(get("arrival_time", rec)),
+			departure_time: gtfsSeconds(get("departure_time", rec)),
 			stop_id:        get("stop_id", rec),
 			stop_sequence:  seq,
 		})
@@ -2237,6 +2235,22 @@ func parseGTFSSeconds(t string) int {
 	return h*3600 + m*60 + s
 }
 
+// gtfsSeconds parses a GTFS time like "25:10:05"; -1 means no time scheduled.
+func gtfsSeconds(t string) int {
+	if t == "" {
+		return -1
+	}
+	return parseGTFSSeconds(t)
+}
+
+// gtfsTimeString formats seconds-since-midnight back to "HH:MM:SS"; "" if unset.
+func gtfsTimeString(sec int) string {
+	if sec < 0 {
+		return ""
+	}
+	return fmt.Sprintf("%02d:%02d:%02d", sec/3600, sec%3600/60, sec%60)
+}
+
 func stopDepartures(stopIDs map[string]bool, limit int) []map[string]interface{} {
 	now := time.Now().In(loadAgencyTimezone())
 	nowSecs := now.Unix()
@@ -2263,15 +2277,15 @@ func stopDepartures(stopIDs map[string]bool, limit int) []map[string]interface{}
 			continue
 		}
 		for _, st := range times {
-			if !stopIDs[st.stop_id] || st.departure_time == "" {
+			if !stopIDs[st.stop_id] || st.departure_time < 0 {
 				continue
 			}
 			var abs int64
 			switch {
 			case todayServices[trip.service_id]:
-				abs = todayStart + int64(parseGTFSSeconds(st.departure_time))
+				abs = todayStart + int64(st.departure_time)
 			case yesterdayServices[trip.service_id]:
-				abs = yesterdayStart + int64(parseGTFSSeconds(st.departure_time))
+				abs = yesterdayStart + int64(st.departure_time)
 			default:
 				continue
 			}
@@ -2285,7 +2299,7 @@ func stopDepartures(stopIDs map[string]bool, limit int) []map[string]interface{}
 	seen := make(map[string]bool, len(deps))
 	deduped := deps[:0]
 	for _, d := range deps {
-		key := d.st.trip_id + "|" + strconv.FormatInt(d.abs, 10)
+		key := d.trip.trip_id + "|" + strconv.FormatInt(d.abs, 10)
 		if seen[key] {
 			continue
 		}
@@ -2299,13 +2313,13 @@ func stopDepartures(stopIDs map[string]bool, limit int) []map[string]interface{}
 	out := make([]map[string]interface{}, 0, len(deps))
 	for _, d := range deps {
 		out = append(out, map[string]interface{}{
-			"trip_id":             d.st.trip_id,
+			"trip_id":             d.trip.trip_id,
 			"route_id":            d.trip.route_id,
 			"route_short_name":    getRouteShortName(d.trip.route_id),
 			"trip_headsign":       d.trip.trip_headsign,
 			"direction_id":        d.trip.direction_id,
-			"arrival_time":        d.st.arrival_time,
-			"departure_time":      d.st.departure_time,
+			"arrival_time":        gtfsTimeString(d.st.arrival_time),
+			"departure_time":      gtfsTimeString(d.st.departure_time),
 			"departure_timestamp": d.abs,
 		})
 	}
