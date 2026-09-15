@@ -35,7 +35,7 @@ const (
 )
 
 const (
-	vehiclePositionsCacheInterval = 1 * time.Minute
+	vehiclePositionsCacheInterval = 20 * time.Second
 	tripUpdatesCacheInterval      = 1 * time.Minute
 	datafeedsRefreshInterval      = 1 * time.Hour
 )
@@ -85,6 +85,12 @@ var (
 
 var bayAreaTripUpdates tripUpdateStore
 
+// API keys used for the 511 vehicle-positions pull, rotated on each refresh
+// to stay under the per-key rate limit. Read from LOCATIONS_API_KEY plus
+// LOCATIONS_API_KEY_2.._4 in main().
+var locationsAPIKeys []string
+var locationsAPIKeyIdx atomic.Uint32
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println(".env not found or could not be loaded, falling back to existing env")
@@ -105,13 +111,18 @@ func main() {
 	} else {
 		defer closeMongoDB()
 	}
-	if os.Getenv("LOCATIONS_API_KEY") == "" {
+	for _, name := range []string{"LOCATIONS_API_KEY", "LOCATIONS_API_KEY_2", "LOCATIONS_API_KEY_3", "LOCATIONS_API_KEY_4"} {
+		if k := os.Getenv(name); k != "" {
+			locationsAPIKeys = append(locationsAPIKeys, k)
+		}
+	}
+	if len(locationsAPIKeys) == 0 {
 		log.Fatalln("LOCATIONS_API_KEY not set")
 	}
 	go runDatafeedsRefresher()
 	go runVehiclePositionsRefresher()
 	go runTripUpdatesRefresher()
-	startSeattleRegion()
+	// startSeattleRegion() // Seattle/Sound Transit region disabled
 	startSacrtRegion()
 	startElkRegion()
 	if data, err := os.ReadFile(vehiclePositionsCacheFilePath); err == nil && len(data) > 0 {
@@ -532,10 +543,11 @@ func runVehiclePositionsRefresher() {
 }
 
 func refreshVehiclePositions() error {
-	apiKey := os.Getenv("LOCATIONS_API_KEY")
-	if apiKey == "" {
+	if len(locationsAPIKeys) == 0 {
 		return fmt.Errorf("LOCATIONS_API_KEY not set")
 	}
+	idx := int(locationsAPIKeyIdx.Add(1)-1) % len(locationsAPIKeys)
+	apiKey := locationsAPIKeys[idx]
 	client := &http.Client{Timeout: 15 * time.Second}
 	url := fmt.Sprintf("%s?api_key=%s&agency=%s", vehiclePositionsURL, apiKey, agencyParam)
 	req, err := http.NewRequest(http.MethodGet, url, nil)

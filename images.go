@@ -241,11 +241,16 @@ func vehicleImagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Vehicle ids collide across agencies (e.g. DB:211 vs WC:211), so an
+	// optional agency code scopes the lookup.
+	filter := bson.M{"vehicle_id": vehicleID}
+	if agency := r.URL.Query().Get("agency"); agency != "" {
+		filter["agency_code"] = agency
+	}
+	opts := options.Find().SetSort(bson.M{"uploaded_at": -1})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	filter := bson.M{"vehicle_id": vehicleID}
-	opts := options.Find().SetSort(bson.M{"uploaded_at": -1})
 
 	cursor, err := imagesCollection.Find(ctx, filter, opts)
 	if err != nil {
@@ -363,19 +368,41 @@ func vehicleIdsWithImagesHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	ids, err := imagesCollection.Distinct(ctx, "vehicle_id", bson.M{})
+	// Distinct (vehicle_id, agency_code) pairs, so the client can key images
+	// by a unique identifyer instead of the colliding bare vehicle id.
+	pipeline := bson.A{
+		bson.M{"$group": bson.M{"_id": bson.M{"vehicle_id": "$vehicle_id", "agency_code": "$agency_code"}}},
+	}
+	cursor, err := imagesCollection.Aggregate(ctx, pipeline)
 	if err != nil {
-		log.Printf("mongo distinct failed: %v", err)
+		log.Printf("mongo aggregate failed: %v", err)
 		http.Error(w, "failed to query images", http.StatusInternalServerError)
 		return
 	}
-
-	if ids == nil {
-		ids = []interface{}{}
+	defer cursor.Close(ctx)
+	var keys []map[string]string
+	for cursor.Next(ctx) {
+		var row struct {
+			ID struct {
+				VehicleID  string `bson:"vehicle_id"`
+				AgencyCode string `bson:"agency_code"`
+			} `bson:"_id"`
+		}
+		if err := cursor.Decode(&row); err != nil {
+			log.Printf("mongo cursor decode failed: %v", err)
+			continue
+		}
+		keys = append(keys, map[string]string{
+			"vehicle_id":  row.ID.VehicleID,
+			"agency_code": row.ID.AgencyCode,
+		})
+	}
+	if keys == nil {
+		keys = []map[string]string{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ids)
+	json.NewEncoder(w).Encode(keys)
 }
 
 func imageUploadPageHandler(w http.ResponseWriter, r *http.Request) {
