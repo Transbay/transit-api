@@ -349,6 +349,35 @@ func vehicleImagesListHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(images)
 }
 
+func vehicleIdsWithImagesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if imagesCollection == nil {
+		http.Error(w, "MongoDB is not connected", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ids, err := imagesCollection.Distinct(ctx, "vehicle_id", bson.M{})
+	if err != nil {
+		log.Printf("mongo distinct failed: %v", err)
+		http.Error(w, "failed to query images", http.StatusInternalServerError)
+		return
+	}
+
+	if ids == nil {
+		ids = []interface{}{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ids)
+}
+
 func imageUploadPageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, `<!DOCTYPE html>

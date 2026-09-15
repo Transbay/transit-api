@@ -135,6 +135,7 @@ func main() {
 	mux.HandleFunc("/api", graphQLHandler)
 	mux.HandleFunc("/api/images/upload", createImageHandler)
 	mux.HandleFunc("/api/images/vehicle/{vehicle_id}", vehicleImagesHandler)
+	mux.HandleFunc("/api/images/vehicle-ids", vehicleIdsWithImagesHandler)
 	mux.HandleFunc("/api/images/file/{id}", serveImageFileHandler)
 	mux.HandleFunc("/api/images/{id}", deleteImageHandler)
 	mux.HandleFunc("/api/images", vehicleImagesListHandler)
