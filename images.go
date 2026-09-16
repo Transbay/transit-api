@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"image"
 	_ "image/gif"
+	"image/jpeg"
 	_ "image/jpeg"
 	_ "image/png"
-	"image/jpeg"
 	"io"
 	"log"
 	"math"
@@ -50,9 +50,10 @@ func uploadableContentType(ct string) bool {
 	return false
 }
 
+const scale = 50
 const (
-	maxImageWidth  = 320
-	maxImageHeight = 180
+	maxImageWidth  = 16 * scale
+	maxImageHeight = 9 * scale
 )
 
 // resizeImage downscales (never upscales) an image to fit within
