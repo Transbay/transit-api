@@ -50,7 +50,7 @@ func uploadableContentType(ct string) bool {
 	return false
 }
 
-const scale = 50
+const scale = 100
 const (
 	maxImageWidth  = 16 * scale
 	maxImageHeight = 9 * scale
