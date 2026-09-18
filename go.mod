@@ -1,22 +1,23 @@
 module headways-server
 
-go 1.24
-
-toolchain go1.24.5
+go 1.26.0
 
 require (
 	github.com/joho/godotenv v1.5.1
 	google.golang.org/protobuf v1.36.11
 )
 
-require github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs v1.0.0
+require (
+	github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs v1.0.0
+	github.com/graphql-go/graphql v0.8.1
+	github.com/redis/go-redis/v9 v9.22.0
+	golang.org/x/image v0.46.0
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/graphql-go/graphql v0.8.1 // indirect
-	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
 
 require (
@@ -29,6 +30,6 @@ require (
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.mongodb.org/mongo-driver v1.17.9
 	golang.org/x/crypto v0.26.0 // indirect
-	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/text v0.17.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )
