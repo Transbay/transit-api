@@ -59,6 +59,13 @@ const (
 	// the bridge existed. Ticking fast and fetching slow is the point: freshness when the
 	// bridge is up, the old behaviour exactly when it is not.
 	directFetchMinInterval = 1 * time.Minute
+
+	// With the bridge off, 511 is the only source, so each feed keeps the cadence it had
+	// before the bridge: positions every twenty seconds across the rotating key pool, trip
+	// updates once a minute on their single key. The five-second tick must never reach 511
+	// on its own -- that is 720 requests an hour against keys allowed sixty.
+	directVehiclePositionsInterval = 20 * time.Second
+	directTripUpdatesInterval      = 1 * time.Minute
 )
 
 var (
@@ -245,6 +252,14 @@ func refreshTripUpdates() error {
 	body, fetchedAt, err := fetchFeedBytes("tu", baseURL, envKey("TRIP_UPDATES_API_KEY"), "trip updates")
 	if err != nil {
 		return err
+	}
+	tripUpdatesCacheMu.RLock()
+	unchanged := fetchedAt.Equal(tripUpdatesCacheTime)
+	tripUpdatesCacheMu.RUnlock()
+	if unchanged {
+		// Same bytes as last tick: the poller publishes every fifteen seconds and we look
+		// every five. Re-decoding them would be pure CPU.
+		return errSkipCycle
 	}
 	var feed gtfs.FeedMessage
 	if err := proto.Unmarshal(body, &feed); err != nil {
@@ -575,9 +590,14 @@ var (
 // claimDirectFetch reports whether a direct 511 fetch for this feed is due, and records
 // it if so. One caller wins per interval; the rest wait.
 func claimDirectFetch(kind string) bool {
+	return claimDirectFetchEvery(kind, directFetchMinInterval)
+}
+
+// claimDirectFetchEvery is claimDirectFetch with an explicit floor.
+func claimDirectFetchEvery(kind string, interval time.Duration) bool {
 	directFetchMu.Lock()
 	defer directFetchMu.Unlock()
-	if last, ok := directFetchAt[kind]; ok && time.Since(last) < directFetchMinInterval {
+	if last, ok := directFetchAt[kind]; ok && time.Since(last) < interval {
 		return false
 	}
 	directFetchAt[kind] = time.Now()
@@ -630,6 +650,14 @@ func fetchFeedBytes(kind, feedURL string, nextKey func() (string, error), what s
 		// Loud, because this is spending 511 budget the bridge exists to stop spending.
 		// A steady trickle of these is a broken bridge wearing working software's face.
 		log.Printf("bridge: falling back to 511 for %s: %v", what, err)
+	} else {
+		interval := directTripUpdatesInterval
+		if kind == "vp" {
+			interval = directVehiclePositionsInterval
+		}
+		if !claimDirectFetchEvery(kind, interval) {
+			return nil, time.Time{}, errSkipCycle
+		}
 	}
 
 	apiKey, err := nextKey()
@@ -663,6 +691,14 @@ func refreshVehiclePositions() error {
 	body, fetchedAt, err := fetchFeedBytes("vp", vehiclePositionsURL, nextLocationsKey, "vehicle positions")
 	if err != nil {
 		return err
+	}
+	vehiclePositionsCacheMu.RLock()
+	unchanged := fetchedAt.Equal(vehiclePositionsCacheTime)
+	vehiclePositionsCacheMu.RUnlock()
+	if unchanged {
+		// Same bytes as last tick; enrichment and trip pre-computation are the expensive
+		// part of this server, and redoing them on an identical feed buys nothing.
+		return errSkipCycle
 	}
 
 	// Corrections are refreshed alongside the positions they will be applied to, so a
