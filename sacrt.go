@@ -124,8 +124,8 @@ func (r *sacrtRegion) _fillTripTimes(trips map[string]TripInfo) {
 			continue
 		}
 		if t, ok := trips[tid]; ok {
-			t.trip_start_time = times[0].departure_time
-			t.trip_end_time = times[len(times)-1].arrival_time
+			t.trip_start_time = gtfsTimeString(times[0].departure_time)
+			t.trip_end_time = gtfsTimeString(times[len(times)-1].arrival_time)
 			trips[tid] = t
 		}
 	}
@@ -151,9 +151,8 @@ func (r *sacrtRegion) loadStopTimesRaw() map[string][]StopTimeInfo {
 			seq, _ = strconv.Atoi(rec["stop_sequence"])
 		}
 		st[tid] = append(st[tid], StopTimeInfo{
-			trip_id:        tid,
-			arrival_time:   rec["arrival_time"],
-			departure_time: rec["departure_time"],
+			arrival_time:   gtfsSeconds(rec["arrival_time"]),
+			departure_time: gtfsSeconds(rec["departure_time"]),
 			stop_id:        rec["stop_id"],
 			stop_sequence:  seq,
 		})
@@ -356,15 +355,15 @@ func (r *sacrtRegion) departures(stopIDs map[string]bool, limit int) []map[strin
 			continue
 		}
 		for _, st := range times {
-			if !stopIDs[st.stop_id] || st.departure_time == "" {
+			if !stopIDs[st.stop_id] || st.departure_time < 0 {
 				continue
 			}
 			var abs int64
 			switch {
 			case services[trip.service_id]:
-				abs = todayStart + int64(parseGTFSSeconds(st.departure_time))
+				abs = todayStart + int64(st.departure_time)
 			case yserv[trip.service_id]:
-				abs = yesterdayStart + int64(parseGTFSSeconds(st.departure_time))
+				abs = yesterdayStart + int64(st.departure_time)
 			default:
 				continue
 			}
@@ -378,19 +377,19 @@ func (r *sacrtRegion) departures(stopIDs map[string]bool, limit int) []map[strin
 	seen := map[string]bool{}
 	out := make([]map[string]interface{}, 0, len(deps))
 	for _, d := range deps {
-		key := d.st.trip_id + "|" + strconv.FormatInt(d.abs, 10)
+		key := d.t.trip_id + "|" + strconv.FormatInt(d.abs, 10)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 		out = append(out, map[string]interface{}{
-			"trip_id":             d.st.trip_id,
+			"trip_id":             d.t.trip_id,
 			"route_id":            d.t.route_id,
 			"route_short_name":    r.routeShortName(d.t.route_id),
 			"trip_headsign":       d.t.trip_headsign,
 			"direction_id":        d.t.direction_id,
-			"arrival_time":        d.st.arrival_time,
-			"departure_time":      d.st.departure_time,
+			"arrival_time":        gtfsTimeString(d.st.arrival_time),
+			"departure_time":      gtfsTimeString(d.st.departure_time),
 			"departure_timestamp": d.abs,
 		})
 		if len(out) >= limit {
@@ -557,7 +556,7 @@ func (r *sacrtRegion) enrich(payload []byte) []byte {
 				if stopID, _ := vehicle["stopId"].(string); stopID != "" {
 					for _, st := range r.stopTimesForTrip(tripID) {
 						if st.stop_id == stopID {
-							trip["delay"] = nowSec - parseGTFSSeconds(st.departure_time)
+							trip["delay"] = nowSec - st.departure_time
 							break
 						}
 					}
@@ -699,8 +698,8 @@ func sacrtTripDetail(tripID string) (interface{}, error) {
 		schedule = append(schedule, map[string]interface{}{
 			"stop_id":        st.stop_id,
 			"stop_sequence":  st.stop_sequence,
-			"arrival_time":   st.arrival_time,
-			"departure_time": st.departure_time,
+			"arrival_time":   gtfsTimeString(st.arrival_time),
+			"departure_time": gtfsTimeString(st.departure_time),
 			"stop_name":      stop.stop_name,
 			"stop_lat":       stop.stop_lat,
 			"stop_lon":       stop.stop_lon,
