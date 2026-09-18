@@ -42,6 +42,9 @@ type VehicleImage struct {
 
 const maxUploadBytes = 10 << 20 // 10 MB
 
+// withoutImageData is the projection for any query that lists images rather than serving one.
+var withoutImageData = bson.M{"image_data": 0}
+
 func uploadableContentType(ct string) bool {
 	switch ct {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
@@ -128,6 +131,17 @@ func initMongoDB() error {
 	mongoClient = client
 	db := client.Database("headways")
 	imagesCollection = db.Collection("vehicle_images")
+
+	// Every lookup is by vehicle, and the map asks which vehicles have images on each
+	// load. Without this index both scan the whole collection -- image bytes included --
+	// for a handful of small documents. Creating it is a no-op when it already exists.
+	idxCtx, idxCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer idxCancel()
+	if _, err := imagesCollection.Indexes().CreateOne(idxCtx, mongo.IndexModel{
+		Keys: bson.D{{Key: "vehicle_id", Value: 1}, {Key: "agency_code", Value: 1}},
+	}); err != nil {
+		log.Printf("mongo: could not create vehicle index: %v", err)
+	}
 
 	log.Println("Connected to MongoDB")
 	return nil
@@ -304,7 +318,9 @@ func vehicleImagesHandler(w http.ResponseWriter, r *http.Request) {
 	if agency := r.URL.Query().Get("agency"); agency != "" {
 		filter["agency_code"] = agency
 	}
-	opts := options.Find().SetSort(bson.M{"uploaded_at": -1})
+	// Without the bytes: listings never return them (image_data is json:"-"), and fetching
+	// them anyway pulls every one of a vehicle's photos through Mongo and this server.
+	opts := options.Find().SetSort(bson.M{"uploaded_at": -1}).SetProjection(withoutImageData)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -387,7 +403,7 @@ func vehicleImagesListHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	opts := options.Find().SetSort(bson.M{"uploaded_at": -1}).SetLimit(50)
+	opts := options.Find().SetSort(bson.M{"uploaded_at": -1}).SetLimit(50).SetProjection(withoutImageData)
 	cursor, err := imagesCollection.Find(ctx, bson.M{}, opts)
 	if err != nil {
 		log.Printf("mongo list all failed: %v", err)
@@ -427,7 +443,12 @@ func vehicleIdsWithImagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Distinct (vehicle_id, agency_code) pairs, so the client can key images
 	// by a unique identifyer instead of the colliding bare vehicle id.
+	//
+	// Sorted and projected on the index's own fields first, so this is answered from the
+	// vehicle index alone and never reads a document.
 	pipeline := bson.A{
+		bson.M{"$sort": bson.D{{Key: "vehicle_id", Value: 1}, {Key: "agency_code", Value: 1}}},
+		bson.M{"$project": bson.M{"_id": 0, "vehicle_id": 1, "agency_code": 1}},
 		bson.M{"$group": bson.M{"_id": bson.M{"vehicle_id": "$vehicle_id", "agency_code": "$agency_code"}}},
 	}
 	cursor, err := imagesCollection.Aggregate(ctx, pipeline)
