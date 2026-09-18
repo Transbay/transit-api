@@ -25,7 +25,9 @@ import type { TripUpdateRecord } from './observe.js'
  * `/v1/departures` is not touched by any of this. It serves the agency's raw times in the
  * SIRI envelope the app has always read, byte-compatible with builds that have been on
  * people's phones for months, and nothing in this file can change that. Corrections live
- * here, where a reader who wants them can ask and a widget that does not is unaffected.
+ * here, where a reader who wants them can ask and a widget that does not is unaffected --
+ * unless `DEPARTURES_CORRECTED` is turned on, which applies the confident ones there too
+ * (`correction.ts`), in the same envelope.
  *
  * The index below exists for the same reason. Adding a trip reference to the departures
  * snapshot would have been simpler, and would have changed the bytes of the one response

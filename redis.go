@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	gtfs "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/protobuf/proto"
 )
 
 // The bridge: where this server gets its Bay Area realtime data.
@@ -174,6 +176,40 @@ func bridgeFeed(ctx context.Context, kind string) ([]byte, time.Time, error) {
 	}
 
 	return payload, fetchedAt, nil
+}
+
+// bridgeExtraVehicles returns vehicles the poller made itself — BART's trains, which
+// BART publishes nowhere — from `hw:vpx`, to be appended to the 511 feed.
+//
+// Additive by design: `hw:vp` is still 511's bytes untouched, and this is a separate
+// feed of our own. Absent, stale or unreadable all mean "no extra vehicles", never an
+// error, so the worst this can do is leave BART off the map.
+func bridgeExtraVehicles(ctx context.Context) []*gtfs.FeedEntity {
+	if !bridge.enabled || redisClient == nil {
+		return nil
+	}
+	key := "hw:vpx:" + bridge.region
+	pipe := redisClient.Pipeline()
+	payloadCmd := pipe.Get(ctx, key)
+	atCmd := pipe.Get(ctx, key+":at")
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil
+	}
+	payload, err := payloadCmd.Bytes()
+	if err != nil || len(payload) == 0 {
+		return nil
+	}
+	if raw, err := atCmd.Result(); err == nil {
+		if at, err := time.Parse(time.RFC3339Nano, raw); err == nil && time.Since(at) > bridge.maxAge {
+			return nil
+		}
+	}
+	var feed gtfs.FeedMessage
+	if err := proto.Unmarshal(payload, &feed); err != nil {
+		log.Printf("bridge: unreadable %s: %v", key, err)
+		return nil
+	}
+	return feed.Entity
 }
 
 // A corrected departure for one trip at one stop, as the poller publishes it.

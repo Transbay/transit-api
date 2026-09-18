@@ -35,7 +35,7 @@ import { startLearner, stopLearner } from './learner.js'
 import * as agencyerror from './agencyerror.js'
 import { writeIndex } from './predictions.js'
 import * as warehouse from './warehouse.js'
-import { publishFeeds, reportBridgeFailure } from './bridge.js'
+import { publishFeeds, publishSynthVehicles, reportBridgeFailure } from './bridge.js'
 
 /** Keeps every agency's departures current, on a schedule of our choosing. */
 
@@ -311,6 +311,11 @@ async function pollRegional(): Promise<void> {
           tables,
         )
         records.push(...bartVehicles)
+        if (config.bridge.enabled) {
+          await publishSynthVehicles(bartVehicles, new Date(startedAt)).catch((err) =>
+            reportBridgeFailure('publishSynthVehicles', err),
+          )
+        }
         console.info(
           `[poller] BART positions: ${stats.placed}/${stats.trips} placed ` +
             `(${stats.atStation} at a station)` +

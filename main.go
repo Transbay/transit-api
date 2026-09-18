@@ -675,6 +675,11 @@ func refreshVehiclePositions() error {
 	if err := proto.Unmarshal(body, &feed); err != nil {
 		return fmt.Errorf("invalid GTFS-realtime protobuf from upstream: %w", err)
 	}
+	// Appended after the 511 bytes are decoded, never spliced into them, so everything
+	// the bridge contract promises about hw:vp still holds.
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	feed.Entity = append(feed.Entity, bridgeExtraVehicles(ctx)...)
+	cancel()
 	marshaler := protojson.MarshalOptions{Indent: "  "}
 	marshaled, err := marshaler.Marshal(&feed)
 	if err != nil {

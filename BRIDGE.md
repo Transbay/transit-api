@@ -46,6 +46,16 @@ the failure mode is plausible, wrong buses rather than an error.
 Both ends assert this, on bytes that a UTF-8 round trip destroys — `poller/src/bridge.test.ts`
 and `bridge_test.go`.
 
+## Vehicles 511 does not carry
+
+BART publishes no positions, so the poller places its trains from trip updates and track
+geometry (`poller/src/bartposition.ts`) and publishes them as a GTFS-RT feed of its own on
+`hw:vpx:<region>`. The Go server appends those entities to the 511 feed *after*
+unmarshalling it, so the one rule above still holds. The key is additive: the contract
+version does not move, and a missing or stale `hw:vpx` means no BART, never an error.
+Trip ids are the archive's own (`BA:<trip>`), so the existing static join supplies route,
+shape and headsign. `BRIDGE_SYNTH_VEHICLES=false` on the poller takes BART off the map.
+
 ## Environment
 
 ### poller (Node)
@@ -59,6 +69,7 @@ Everything in `poller/.env.example`, plus:
 | `BRIDGE_CORRECTIONS` | `false` | Also publish corrected departure times |
 | `BRIDGE_TTL_SECONDS` | `90` | How long a published feed stays readable |
 | `BRIDGE_MIN_CONFIDENCE` | `medium` | Floor a correction must clear to be published |
+| `BRIDGE_SYNTH_VEHICLES` | `true` | Publish BART's synthesised trains on `hw:vpx` |
 
 ### headways-server (Go)
 

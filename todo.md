@@ -190,10 +190,9 @@ outage and an empty map, on a server that never needed Redis before.
 different measurements and must never share a cell — averaging them gives a number that is
 neither, with no symptom.
 
-**BART is excluded from `hw:vp` on purpose.** It still feeds Redis and the learner; it is
-just not on the map, because the frontend has no BART colour or logo and would render a
-fleet of grey unlabelled dots. Adding `'bay area rapid transit': '#0099D8'` to
-`vehicleColors.ts` plus a `bart.png` is Marc's call, in his repo.
+**BART reaches the map through `hw:vpx`, not `hw:vp`.** Its trains are synthesised, so
+they ride a separate feed the Go server appends after decoding 511's bytes (see
+`BRIDGE.md`). Styling (colour, name, logo) lives in the `Transbay/headways` fork.
 
 **Don't reformat.** Prettier is not configured and the existing sources don't satisfy it;
 `gofmt` likewise leaves several pre-existing files unformatted. Running either produces a

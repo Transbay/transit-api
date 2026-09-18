@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	gtfs "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/protobuf/proto"
 )
 
 // The read side of the bridge, against a real Redis.
@@ -187,5 +189,46 @@ func TestDirectFetchThrottle(t *testing.T) {
 	// Independent per feed: vehiclepositions being throttled must not stall tripupdates.
 	if !claimDirectFetch("otherfeed") {
 		t.Fatal("throttle leaked across feeds")
+	}
+}
+
+// BART's synthesised trains arrive on their own key and are appended, never spliced into
+// the 511 bytes. Stale or absent means no extra vehicles, not an error.
+func TestBridgeExtraVehicles(t *testing.T) {
+	client := bridgeTestRedis(t)
+	withBridge(t, client, false)
+	ctx := context.Background()
+	key := "hw:vpx:gotest"
+	t.Cleanup(func() { client.Del(ctx, key, key+":at") })
+
+	if got := bridgeExtraVehicles(ctx); got != nil {
+		t.Fatalf("absent key produced %d vehicles", len(got))
+	}
+
+	tripID := "BA:1234567"
+	payload, err := proto.Marshal(&gtfs.FeedMessage{
+		Header: &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("2.0")},
+		Entity: []*gtfs.FeedEntity{{
+			Id: proto.String(tripID),
+			Vehicle: &gtfs.VehiclePosition{
+				Trip:     &gtfs.TripDescriptor{TripId: proto.String(tripID)},
+				Position: &gtfs.Position{Latitude: proto.Float32(37.8), Longitude: proto.Float32(-122.27)},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Set(ctx, key, payload, time.Minute)
+	client.Set(ctx, key+":at", time.Now().UTC().Format(time.RFC3339Nano), time.Minute)
+
+	got := bridgeExtraVehicles(ctx)
+	if len(got) != 1 || got[0].GetVehicle().GetTrip().GetTripId() != tripID {
+		t.Fatalf("expected the one BART train back, got %v", got)
+	}
+
+	client.Set(ctx, key+":at", time.Now().Add(-10*time.Minute).UTC().Format(time.RFC3339Nano), time.Minute)
+	if got := bridgeExtraVehicles(ctx); got != nil {
+		t.Fatalf("a stale feed was used: %d vehicles", len(got))
 	}
 }
