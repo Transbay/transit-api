@@ -39,9 +39,10 @@ if (!REDIS) {
   const VP = 'hw:vp:testregion'
   const TU = 'hw:tu:testregion'
   const CORR = 'hw:corr:testregion'
+  const VPX = 'hw:vpx:testregion'
 
   const clean = async () => {
-    await redis.del(VP, `${VP}:at`, TU, `${TU}:at`, CORR, `${CORR}:staging`, 'hw:bridge:v')
+    await redis.del(VP, `${VP}:at`, TU, `${TU}:at`, CORR, `${CORR}:staging`, VPX, `${VPX}:at`, 'hw:bridge:v')
   }
 
   test('the feed republished is the feed received, byte for byte', async () => {
@@ -124,6 +125,44 @@ if (!REDIS) {
     assert.equal(written, 0)
     assert.equal(await redis.exists(CORR), 0, 'a stale correction set outlived its evidence')
 
+    await clean()
+  })
+
+  test('synthesised vehicles decode as GTFS-RT the consumer can join', async () => {
+    await clean()
+    const { default: GtfsRealtimeBindings } = await import('gtfs-realtime-bindings')
+    const rt = GtfsRealtimeBindings.transit_realtime
+
+    const at = new Date('2026-09-09T18:22:04.000Z')
+    await bridge.publishSynthVehicles(
+      [
+        {
+          id: '1234567', agency: 'BA', lineRef: 'Red-N', lineName: 'Red', destination: 'Richmond',
+          directionRef: '0', lat: 37.8, lon: -122.27, bearing: 90, speed: 20,
+          nextStopId: 'MCAR', at: '2026-09-09T18:22:00Z', source: 'synthesized', confidence: 'high',
+        },
+        // A measured vehicle is already in hw:vp. Publishing it here would draw it twice.
+        {
+          id: '8001', agency: 'SF', lineRef: 'N', lineName: 'N', destination: 'Ocean Beach',
+          directionRef: '0', lat: 37.77, lon: -122.45, at: '2026-09-09T18:22:00Z', source: 'gtfsrt',
+        },
+      ],
+      at,
+    )
+
+    const feed = rt.FeedMessage.decode(new Uint8Array((await redis.getBuffer(VPX))!))
+    assert.equal(feed.entity.length, 1, 'a measured vehicle leaked into hw:vpx')
+    const v = feed.entity[0].vehicle!
+    // The archive's own trip key, so the consumer's static join finds route and shape.
+    assert.equal(v.trip!.tripId, 'BA:1234567')
+    assert.equal(v.stopId, 'MCAR')
+    assert.ok(Math.abs(v.position!.latitude - 37.8) < 1e-4)
+    assert.equal(await redis.get(`${VPX}:at`), '2026-09-09T18:22:04.000Z')
+    // It is additive, so the contract version is untouched.
+    assert.equal(bridge.bridgeStatus().synthVehicles, 1)
+
+    const ttl = await redis.ttl(VPX)
+    assert.ok(ttl > 0 && ttl <= 90, `expected a bounded TTL, got ${ttl}`)
     await clean()
   })
 

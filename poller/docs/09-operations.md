@@ -171,6 +171,7 @@ Everything not listed in the README's `.env.example`:
 | `PROFILE_STREAM_MAXLEN` | `200000` | Observation stream cap |
 | `PREDICTION_MODE` | `shadow` | `off` / `shadow` / `on` |
 | `PREDICTION_MIN_SAMPLES` | `3` | Below this, a segment offers no correction |
+| `DEPARTURES_CORRECTED` | `false` | Apply confident corrections to `/v1/departures` itself, same envelope. Needs `PREDICTION_MODE=on` |
 | `DATABASE_URL` | — | Absent means no warehouse, which is supported |
 | `DATABASE_POOL_SIZE` | `4` | |
 | `DATABASE_MIGRATE` | `true` | Set false on a replica that must not race the leader |

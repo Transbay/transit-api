@@ -234,8 +234,8 @@ export const config = {
    * `confidence: none` with `predicted == raw`. `on` lets the evidence decide, per agency
    * and per horizon, via the promotion gate in `score.ts`.
    *
-   * None of these settings can change `/v1/departures`, which serves raw agency times in
-   * every mode. Corrections live on `/v1/predictions` only.
+   * None of `mode` or `minSamples` changes `/v1/departures`, which serves raw agency times
+   * unless `correctDepartures` is on as well.
    */
   predictions: {
     mode: (() => {
@@ -244,6 +244,16 @@ export const config = {
     })() as 'off' | 'shadow' | 'on',
     /** Effective samples below which a segment never offers a correction. */
     minSamples: Number(optional('PREDICTION_MIN_SAMPLES', '3')),
+    /**
+     * Whether `/v1/departures` itself carries the corrections, in its usual SIRI envelope.
+     *
+     * Off by default because that response is what every shipped app build reads. On, only
+     * the expected times of profiled agencies move, and only where `/v1/predictions` would
+     * claim the correction at `BRIDGE_MIN_CONFIDENCE` or better -- so it also needs
+     * `PREDICTION_MODE=on`, without which every confidence is `shadow` and nothing moves.
+     * Turning it off again returns the agency's raw times on the next request.
+     */
+    correctDepartures: optional('DEPARTURES_CORRECTED', 'false') === 'true',
   },
 
   /**
@@ -337,6 +347,14 @@ export const config = {
      * left alone, so the bridge can never make a displayed time worse than it is today.
      */
     minConfidence: optional('BRIDGE_MIN_CONFIDENCE', 'medium'),
+    /**
+     * Whether to publish BART's synthesised trains on `hw:vpx`, so they appear on the map.
+     *
+     * Its own switch because it is the one bridge output that is inferred rather than
+     * relayed: turning it off takes BART off the map and leaves every measured vehicle
+     * exactly where it was.
+     */
+    synthVehicles: optional('BRIDGE_SYNTH_VEHICLES', 'true') === 'true',
     /** Bumped when the shape of any bridge key changes. Consumers refuse what they don't know. */
     version: 1,
   },

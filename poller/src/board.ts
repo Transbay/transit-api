@@ -4,6 +4,7 @@ import { loadStopTable } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
 import { page, esc, jsonLiteral } from './chrome.js'
 import { predictionsFor } from './predictions.js'
+import { joinKey } from './correction.js'
 import { config } from './config.js'
 
 /**
@@ -150,19 +151,7 @@ async function build(
   try {
     const predicted = await predictionsFor(upper, stopCode)
 
-    // Joined on line and the agency's own departure time, not on the trip id.
-    //
-    // The id looked like the obvious key and silently matched nothing. SIRI's
-    // DatedVehicleJourneyRef is `shortName || stripAgencyPrefix(tripId)` (gtfsrt.ts), so it
-    // is a train number for operators that publish one and an unqualified id otherwise,
-    // while the prediction index is keyed on the agency-qualified id. Every lookup missed
-    // and the page simply showed no corrections, which is indistinguishable from having
-    // learned nothing.
-    //
-    // Line plus timestamp is stable because both sides are built from the same feed entry,
-    // so the raw time is identical rather than merely close.
-    const joinKey = (line: string, epochMs: number) =>
-      `${line.toLowerCase()}|${Math.round(epochMs / 1000)}`
+    // Joined on line and the agency's own time; see `joinKey` for why not the trip id.
     const byKey = new Map(
       predicted.predictions.map((p) => [joinKey(p.lineRef, Date.parse(p.raw)), p]),
     )

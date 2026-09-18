@@ -1,5 +1,9 @@
+import GtfsRealtimeBindings from 'gtfs-realtime-bindings'
 import { config } from './config.js'
 import { redis } from './redis.js'
+import type { VehicleRecord } from './gtfsrt.js'
+
+const { transit_realtime: rt } = GtfsRealtimeBindings
 
 /**
  * The bridge to the Go `headways-server`.
@@ -22,12 +26,14 @@ import { redis } from './redis.js'
  * If a future version needs to reshape them, that is a new key and a `bridge.version`
  * bump. Editing these in place would break a consumer that has no way to notice.
  *
- * ## What is deliberately not here
+ * ## Vehicles 511 does not carry
  *
- * BART. It is synthesised into `511:veh:BA` and fed to the learner, but it is *not* in
- * `hw:vp` — headways has no BART styling and a fleet of grey untitled dots is worse than
- * no dots. `hw:corr` is agency-agnostic and may carry BART entries; the consumer simply
- * has no BART vehicle to attach them to.
+ * BART publishes no positions anywhere, so its trains are synthesised from trip updates
+ * (`bartposition.ts`). They cannot go in `hw:vp` without breaking the one rule, so they go
+ * in **`hw:vpx:<region>`**: a GTFS-RT `FeedMessage` of our own making, which the consumer
+ * appends to the 511 feed after unmarshalling it. A new key rather than a reshaped one, so
+ * the contract version does not move and a consumer that has never heard of it is
+ * unaffected.
  */
 
 /** How the last publish went, for `/health`. Counters, because nobody watches silence. */
@@ -35,6 +41,8 @@ export interface BridgeStats {
   lastPublishAt: string | null
   vehicleBytes: number
   tripUpdateBytes: number
+  /** Synthesised vehicles on `hw:vpx` last cycle. Zero overnight; zero all day is BART lost. */
+  synthVehicles: number
   corrections: number
   /** Alert on this. A rising count means headways is quietly running on stale bytes. */
   failures: number
@@ -45,6 +53,7 @@ const stats: BridgeStats = {
   lastPublishAt: null,
   vehicleBytes: 0,
   tripUpdateBytes: 0,
+  synthVehicles: 0,
   corrections: 0,
   failures: 0,
   lastError: null,
@@ -55,6 +64,7 @@ export function bridgeStatus(): BridgeStats & { enabled: boolean; region: string
 }
 
 const vpKey = () => `hw:vp:${config.bridge.region}`
+const vpxKey = () => `hw:vpx:${config.bridge.region}`
 const tuKey = () => `hw:tu:${config.bridge.region}`
 const corrKey = () => `hw:corr:${config.bridge.region}`
 
@@ -96,6 +106,62 @@ export async function publishFeeds(
   stats.lastPublishAt = at
   stats.vehicleBytes = vehicles?.byteLength ?? 0
   stats.tripUpdateBytes = tripUpdates?.byteLength ?? 0
+}
+
+/**
+ * Encodes synthesised vehicles as GTFS-RT, the shape the consumer already unmarshals.
+ *
+ * The trip id is rebuilt as `<agency>:<id>` because that is how the 511 archive keys its
+ * trips, and `bartposition.ts` makes the id by stripping exactly that prefix. With it the
+ * consumer's existing static-GTFS join supplies route, shape and headsign unchanged.
+ */
+export function encodeSynthVehicles(records: VehicleRecord[], at: Date): Uint8Array {
+  const feed = rt.FeedMessage.create({
+    header: {
+      gtfsRealtimeVersion: '2.0',
+      incrementality: rt.FeedHeader.Incrementality.FULL_DATASET,
+      timestamp: Math.floor(at.getTime() / 1000),
+    },
+    entity: records.map((r) => {
+      const tripId = `${r.agency}:${r.id}`
+      return {
+        id: tripId,
+        vehicle: {
+          trip: { tripId },
+          vehicle: { id: r.id, label: r.destination },
+          position: {
+            latitude: r.lat,
+            longitude: r.lon,
+            ...(r.bearing !== undefined ? { bearing: r.bearing } : {}),
+            ...(r.speed !== undefined ? { speed: r.speed } : {}),
+          },
+          ...(r.nextStopId
+            ? { stopId: r.nextStopId, currentStatus: rt.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO }
+            : {}),
+          timestamp: Math.floor(Date.parse(r.at) / 1000),
+        },
+      }
+    }),
+  })
+  return rt.FeedMessage.encode(feed).finish()
+}
+
+/**
+ * Publishes this cycle's synthesised vehicles on `hw:vpx`.
+ *
+ * Only synthesised records are taken, whatever the caller passes: anything measured is
+ * already in `hw:vp`, and a vehicle in both would be drawn twice.
+ */
+export async function publishSynthVehicles(records: VehicleRecord[], at: Date): Promise<void> {
+  if (!config.bridge.enabled || !config.bridge.synthVehicles) return
+  const synth = records.filter((r) => r.source === 'synthesized')
+  const ttl = config.bridge.ttlSeconds
+  await redis
+    .pipeline()
+    .set(vpxKey(), Buffer.from(encodeSynthVehicles(synth, at)), 'EX', ttl)
+    .set(`${vpxKey()}:at`, at.toISOString(), 'EX', ttl)
+    .exec()
+  stats.synthVehicles = synth.length
 }
 
 /** One corrected departure, as the Go server reads it. Keys are short because there are many. */
