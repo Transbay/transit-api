@@ -235,10 +235,10 @@ func (r *seattleRegion) loadStopTimesRaw() map[string][]StopTimeInfo {
 			seq, _ = strconv.Atoi(rec["stop_sequence"])
 		}
 		st[tid] = append(st[tid], StopTimeInfo{
-			arrival_time:   gtfsSeconds(rec["arrival_time"]),
-			departure_time: gtfsSeconds(rec["departure_time"]),
+			arrival_time:   int32(gtfsSeconds(rec["arrival_time"])),
+			departure_time: int32(gtfsSeconds(rec["departure_time"])),
 			stop_id:        rec["stop_id"],
-			stop_sequence:  seq,
+			stop_sequence:  int32(seq),
 		})
 	})
 	r.stopTimes.store(&st)
@@ -852,7 +852,7 @@ func (r *seattleRegion) enrich(payload []byte) []byte {
 			}
 			for _, st := range r.stopTimesForTrip(gID) {
 				if st.stop_id == gstop {
-					trip["delay"] = nowSec - st.departure_time
+					trip["delay"] = nowSec - int(st.departure_time)
 					break
 				}
 			}
