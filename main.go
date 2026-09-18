@@ -346,7 +346,7 @@ func enrichVehiclePositions(payload []byte) []byte {
 					stopTimes := loadStopTimesForTrip(tripID)
 					for _, st := range stopTimes {
 						if st.stop_id == stopID {
-							scheduledSec := st.departure_time
+							scheduledSec := int(st.departure_time)
 							delay := nowSec - scheduledSec
 							// Three sources, best first: a learned correction, the
 							// agency's own prediction, then the bare schedule.
@@ -1708,11 +1708,14 @@ type TripInfo struct {
 	trip_start_time       string
 	trip_end_time         string
 }
+// StopTimeInfo is one row of stop_times.txt, of which the region has over three million,
+// so it is kept small: 32-bit times and sequence, and a stop_id shared with every other
+// row at the same stop (see loadStopTimesForTrip) rather than a copy per row.
 type StopTimeInfo struct {
-	arrival_time   int // seconds since midnight; -1 = no time scheduled
-	departure_time int // seconds since midnight; -1 = no time scheduled
+	arrival_time   int32 // seconds since midnight; -1 = no time scheduled
+	departure_time int32 // seconds since midnight; -1 = no time scheduled
 	stop_id        string
-	stop_sequence  int
+	stop_sequence  int32
 }
 type VehicleTypeInfo struct {
 	Year     int    `json:"year"`
@@ -1964,31 +1967,103 @@ func loadStopTimesForTrip(tripID string) []StopTimeInfo {
 	if m := stopTimesData.Load(); m != nil {
 		return (*m)[tripID]
 	}
-	st := make(map[string][]StopTimeInfo)
-	filePath := filepath.Join(datafeedsDir, "stop_times.txt")
-	if _, err := os.Stat(filePath); err != nil {
-		stopTimesData.Store(&st)
-		return st[tripID]
-	}
-	file, err := os.Open(filePath)
+	st, err := readStopTimes(filepath.Join(datafeedsDir, "stop_times.txt"))
 	if err != nil {
-		log.Printf("failed to open stop_times.txt: %v", err)
-		stopTimesData.Store(&st)
-		return st[tripID]
+		log.Printf("failed to load stop_times.txt: %v", err)
+	}
+	stopTimesData.Store(&st)
+	return st[tripID]
+}
+
+// readStopTimes loads stop_times.txt grouped by trip, in file order.
+//
+// Two passes over the file, because this is the largest structure the server holds: the
+// first counts rows per trip so the second can fill one exactly-sized backing array,
+// instead of growing three million rows through append and keeping its slack. Every string
+// kept is copied out of the CSV record, since a field is a slice of the whole line and would
+// otherwise hold that line alive, and stop ids are interned so each is stored once.
+func readStopTimes(path string) (map[string][]StopTimeInfo, error) {
+	st := make(map[string][]StopTimeInfo)
+	counts := make(map[string]int)
+	var order []string
+	total := 0
+	err := scanStopTimes(path, func(tid string, _ []string, _ func(string, []string) string) {
+		n, ok := counts[tid]
+		if !ok {
+			tid = strings.Clone(tid)
+			order = append(order, tid)
+		}
+		counts[tid] = n + 1
+		total++
+	})
+	if err != nil {
+		return st, err
+	}
+
+	backing := make([]StopTimeInfo, total)
+	next := make(map[string]int, len(order))
+	offset := 0
+	for _, tid := range order {
+		n := counts[tid]
+		st[tid] = backing[offset : offset : offset+n]
+		next[tid] = offset
+		offset += n
+	}
+	counts = nil
+
+	stopIDs := make(map[string]string)
+	filled := 0
+	err = scanStopTimes(path, func(tid string, rec []string, get func(string, []string) string) {
+		i, ok := next[tid]
+		if !ok {
+			return
+		}
+		sid := get("stop_id", rec)
+		shared, ok := stopIDs[sid]
+		if !ok {
+			shared = strings.Clone(sid)
+			stopIDs[sid] = shared
+		}
+		seq := 0
+		if s := get("stop_sequence", rec); s != "" {
+			fmt.Sscanf(s, "%d", &seq)
+		}
+		backing[i] = StopTimeInfo{
+			arrival_time:   int32(gtfsSeconds(get("arrival_time", rec))),
+			departure_time: int32(gtfsSeconds(get("departure_time", rec))),
+			stop_id:        shared,
+			stop_sequence:  int32(seq),
+		}
+		next[tid] = i + 1
+		st[tid] = st[tid][:len(st[tid])+1]
+		filled++
+	})
+	log.Printf("Loaded %d stop_times entries for %d trips (%d stops)", filled, len(st), len(stopIDs))
+	return st, err
+}
+
+// scanStopTimes calls row for every stop_times.txt record that has a trip id. The record is
+// reused between calls, so anything kept past the call must be copied.
+func scanStopTimes(path string, row func(tid string, rec []string, get func(string, []string) string)) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	defer file.Close()
 	reader := csv.NewReader(file)
 	reader.FieldsPerRecord = -1
 	reader.LazyQuotes = true
+	reader.ReuseRecord = true
 	headers, err := reader.Read()
 	if err != nil {
-		log.Printf("failed to read stop_times.txt headers: %v", err)
-		stopTimesData.Store(&st)
-		return st[tripID]
+		return fmt.Errorf("reading headers: %w", err)
 	}
 	headerMap := make(map[string]int)
 	for i, h := range headers {
-		headerMap[h] = i
+		headerMap[strings.Clone(h)] = i
 	}
 	get := func(field string, rec []string) string {
 		if idx, ok := headerMap[field]; ok && idx < len(rec) {
@@ -2009,29 +2084,15 @@ func loadStopTimesForTrip(tripID string) []StopTimeInfo {
 			rec, err = reader.Read()
 		}()
 		if err == io.EOF {
-			break
+			return nil
 		}
 		if err != nil {
 			continue
 		}
-		tid := get("trip_id", rec)
-		if tid == "" {
-			continue
+		if tid := get("trip_id", rec); tid != "" {
+			row(tid, rec, get)
 		}
-		seq := 0
-		if s := get("stop_sequence", rec); s != "" {
-			fmt.Sscanf(s, "%d", &seq)
-		}
-		st[tid] = append(st[tid], StopTimeInfo{
-			arrival_time:   gtfsSeconds(get("arrival_time", rec)),
-			departure_time: gtfsSeconds(get("departure_time", rec)),
-			stop_id:        get("stop_id", rec),
-			stop_sequence:  seq,
-		})
 	}
-	log.Printf("Loaded %d stop_times entries for %d trips", len(st), len(st))
-	stopTimesData.Store(&st)
-	return st[tripID]
 }
 
 func loadStopsData() map[string]StopInfo {
@@ -2412,7 +2473,7 @@ func gtfsSeconds(t string) int {
 }
 
 // gtfsTimeString formats seconds-since-midnight back to "HH:MM:SS"; "" if unset.
-func gtfsTimeString(sec int) string {
+func gtfsTimeString[T int | int32](sec T) string {
 	if sec < 0 {
 		return ""
 	}
