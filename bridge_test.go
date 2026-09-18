@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"os"
 	"strconv"
@@ -230,5 +231,32 @@ func TestBridgeExtraVehicles(t *testing.T) {
 	client.Set(ctx, key+":at", time.Now().Add(-10*time.Minute).UTC().Format(time.RFC3339Nano), time.Minute)
 	if got := bridgeExtraVehicles(ctx); got != nil {
 		t.Fatalf("a stale feed was used: %d vehicles", len(got))
+	}
+}
+
+// With the bridge off, 511 is the only source and the five-second tick must not reach it
+// directly. This was the failure: every tick fetched, 720 an hour against 60-an-hour keys.
+func TestDirectFetchThrottledWithBridgeOff(t *testing.T) {
+	prev := bridge
+	bridge = bridgeSettings{enabled: false}
+	t.Cleanup(func() { bridge = prev })
+
+	for _, kind := range []string{"vp", "tu"} {
+		directFetchMu.Lock()
+		directFetchAt[kind] = time.Now()
+		directFetchMu.Unlock()
+
+		called := false
+		_, _, err := fetchFeedBytes(kind, "http://127.0.0.1:0/", func() (string, error) {
+			called = true
+			return "k", nil
+		}, kind)
+		if !errors.Is(err, errSkipCycle) || called {
+			t.Fatalf("%s: a fetch inside the floor reached 511 (err=%v)", kind, err)
+		}
+
+		directFetchMu.Lock()
+		delete(directFetchAt, kind)
+		directFetchMu.Unlock()
 	}
 }
