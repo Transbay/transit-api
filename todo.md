@@ -1,16 +1,27 @@
 # transit-api — what's left
 
-Handoff notes. The bridge between the poller and the headways API is built, tested and
-committed; what remains is deployment plus porting the three non-511 regions across.
+Handoff notes. The bridge is deployed and serving; what remains is porting the three
+non-511 regions across and widening what is learned.
 
-**Repo:** `~/Documents/GitHub/transit-api` — `Transbay/transit-api`, 9 commits on `main`,
-**not pushed yet**.
+**Repo:** `~/Documents/GitHub/transit-api` — `Transbay/transit-api`, a fork of
+`rkvmar/headways-server` (remote `upstream`). Upstream changes come in by PR.
 
 ---
 
 ## Where things stand
 
-One repo, two services, one Redis.
+One repo, two services, one Redis — all in the Railway **headways** project:
+
+| Service | Source | |
+|---|---|---|
+| `transitapi` | this repo, root `/poller` | The only thing that talks to 511 (10 keys, 15s). `transitapi.transbay.dev`, and `baytransit.up.railway.app` for shipped app builds |
+| `transitapi-static` | this repo, root `/poller` | `npm run static`, cron `20 10 * * *` |
+| `headways-server` | this repo, root | `BRIDGE_ENABLED=true`, `headwaysapi.transbay.dev` / `.rkmr.dev` |
+| `headways` | `Transbay/headways` (fork of `rkvmar/headways`) | Frontend, BART styling |
+| Redis / Postgres / MongoDB | | Live feeds / learned data / vehicle photos |
+
+The BayTransit Widgets project is retired apart from a stopped copy of the old Postgres.
+
 
 ```
                     511 regional feed (2 req / 15s)
@@ -29,7 +40,7 @@ One repo, two services, one Redis.
                   │ headways-server (Go)  │  GraphQL /api, repo root
                   └───────────┬───────────┘
                               │
-                  headways frontend  (DO NOT TOUCH — see below)
+                  headways frontend  (Transbay/headways)
 ```
 
 Done:
@@ -45,26 +56,18 @@ Done:
 
 ---
 
-## 1. Deploy and cut over  ← start here
+## 1. After the cutover (2026-09-18)
 
-Full detail in `BRIDGE.md`. Every step is one env var and a restart, and rollback is
-setting it back.
+Deployed and cut over: bridge on at both ends, learned data migrated row for row, BART on
+the map via `hw:vpx`. Every remaining step is one variable and a restart.
 
-- [ ] Add the Go service to the **same Railway project** as the poller. It must share that
-      Redis instance — see the budget gotcha below.
-- [ ] Give it `REDIS_URL`, `MONGODB_URI`, `SOUND_TRANSIT_API_KEY`, and a **volume mounted
-      at `data/`**. Leave `BRIDGE_ENABLED` unset: it polls 511 exactly as it does today, so
-      this step changes nothing observable. Confirm the map works.
-- [ ] `BRIDGE_ENABLED=true` on the **poller**. Nothing reads it yet. Check `/health`:
-      `bridge.vehicleBytes` non-zero, `bridge.failures` 0.
-- [ ] **Run the parity diff** (`BRIDGE.md` step 3): same GraphQL response with the bridge
-      on vs off, `fetchedAt` and `delay` masked. Must be empty. A difference means the
-      bridge is reshaping bytes it promised not to — stop and find out why.
-- [ ] `BRIDGE_ENABLED=true` on the **Go service**.
-- [ ] Repoint `headwaysapi.rkmr.dev` DNS. Keep the old host answering until TTL expires.
-- [ ] Later, once stable for a few days: `GTFS_ARCHIVE_URL`, then `BRIDGE_CORRECTIONS=true`,
-      then fold `LOCATIONS_API_KEY` / `TRIP_UPDATES_API_KEY` / `API_KEY` into
-      `FIVEELEVEN_API_KEYS` (10 keys → 13, 600 → 780 req/hour).
+- [ ] When the App Store update ships: `PREDICTION_MODE=on`, then `DEPARTURES_CORRECTED=true`
+      on `transitapi`. Rollback is `DEPARTURES_CORRECTED=false`.
+- [ ] Once stable for a few days: `GTFS_ARCHIVE_URL` on `headways-server`, then
+      `BRIDGE_CORRECTIONS=true` on both.
+- [ ] Leave `BRIDGE_FALLBACK=true` for at least a week. `headways-server` keeps its own
+      511 keys for that fallback only.
+- [ ] Delete the stopped old Postgres in the BayTransit Widgets project, then the project.
 
 ---
 
@@ -161,10 +164,9 @@ SELECT count(DISTINCT agency) FROM prediction_error WHERE source = 'drift';  -- 
 
 ## Gotchas — please read
 
-**Do not touch `~/Documents/GitHub/headways`.** The frontend stays as it is. The whole
-migration was designed so that repo needs zero changes — that is why the DNS gets repointed
-instead of the env var. One trap if you ever do change the API hostname:
-`+page.svelte:671` sniffs the API URL for the string `socal` to choose logo paths.
+**The frontend is the `Transbay/headways` fork.** Keep changes there small so rkvmar's
+upstream still merges cleanly. One trap if you ever change the API hostname:
+`+page.svelte` sniffs the API URL for the string `socal` to choose logo paths.
 
 **`hw:vp` and `hw:tu` are the 511 protobuf, byte for byte.** The Go server runs
 `proto.Unmarshal` on them exactly as it ran it on the HTTP response, so everything
