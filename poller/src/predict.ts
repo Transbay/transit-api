@@ -1,8 +1,8 @@
-import { holdsAt, type TripSchedule } from './schedule.js'
+import type { TripSchedule } from './schedule.js'
 import { epochSecondsFor } from './servicedate.js'
 import { Level, band, type Estimate } from './profile.js'
 import { blockProjection, type BlockState } from './blockstate.js'
-import { DEFAULT_HOLD_OFFSET, shouldHold } from './deviation.js'
+import { DEFAULT_HOLD_OFFSET, HOLD_RATE_THRESHOLD, MIN_HOLD_EVIDENCE } from './deviation.js'
 
 /**
  * Turning what we have learned into a time.
@@ -166,7 +166,7 @@ export function propagate(
     // there is not enough evidence yet. Some stops on a route hold and some do not, and no
     // flag in the feed distinguishes them: `timepoint = 1` marks a published time, not a
     // promise that anybody waits for it.
-    const holds = shouldHold({ rate: est.holdRate, n: est.holdN }, holdsAt(trip, k))
+    const holds = holdsMeasured({ rate: est.holdRate, n: est.holdN })
     if (holds && d < holdOffset) {
       holdContribution += holdOffset - d
       d = holdOffset
@@ -268,6 +268,24 @@ export function temper(correction: number, n: number, k = 15): number {
   return correction * (n / (n + k))
 }
 
+/**
+ * Whether to predict a hold here: only where early vehicles have been *seen* waiting.
+ *
+ * Deliberately not the timetable's `timepoint` flag as a fallback, which is what the
+ * learning side uses to interpret what it saw. Predicting forward, the flag's error is the
+ * expensive one: it moved a Muni 1 running four and a half minutes early back to its
+ * timetable at California & Presidio -- five minutes later than it arrived -- because the
+ * stop is flagged and nobody had measured whether drivers wait there. A late prediction
+ * for an early bus is a missed bus. Without evidence, trust where the vehicle is.
+ */
+export function holdsMeasured(measured: { rate?: number; n?: number } | null | undefined): boolean {
+  return Boolean(
+    measured &&
+      (measured.n ?? 0) >= MIN_HOLD_EVIDENCE &&
+      (measured.rate ?? 0) >= HOLD_RATE_THRESHOLD,
+  )
+}
+
 export function predict(input: PredictInput): Prediction | null {
   const { trip, target, now } = input
   const stop = trip.stops[target]
@@ -367,7 +385,7 @@ export function predict(input: PredictInput): Prediction | null {
 
   // A held stop cannot be predicted before its published time. Same precedence: what has
   // been observed at this stop beats what the timetable says about it.
-  const targetHolds = shouldHold(input.targetHold ?? null, holdsAt(trip, target))
+  const targetHolds = holdsMeasured(input.targetHold ?? input.profileFor(target))
   if (targetHolds && time < scheduled + holdOffset) {
     time = scheduled + holdOffset
     clamps.push('timepoint-hold')

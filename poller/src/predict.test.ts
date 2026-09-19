@@ -147,9 +147,16 @@ test('a long propagation is less certain than the naive sum of its parts', () =>
   assert.ok(Math.abs(p.variance - naive * (1 + 9 * SEGMENT_CORRELATION)) < 1)
 })
 
-test('an early vehicle is held at a timepoint rather than predicted still earlier', () => {
-  // Running four minutes early, on a route that holds at stop index 5.
-  const p = propagate(trip([5]), DATE, 0, 8, -240, flatProfile(0), null)
+/** A flat profile where early vehicles have been seen waiting at the given stop indices. */
+function measuredHoldsAt(indices: number[]) {
+  const plain = flatProfile(0)
+  const holding = flatProfile(0, 100, Level.SegmentDayBucket, { rate: 0.9, n: 50 })
+  return (i: number): Estimate => (indices.includes(i) ? holding() : plain())
+}
+
+test('an early vehicle is held where early vehicles have been seen waiting', () => {
+  // Running four minutes early, on a route measured to hold at stop index 5.
+  const p = propagate(trip([5]), DATE, 0, 8, -240, measuredHoldsAt([5]), null)
   assert.deepEqual(p.heldAt, [5])
   assert.ok(p.deviation >= 0, `a held bus does not leave early: ${p.deviation}`)
   assert.ok(p.basis.hold > 200, 'and the hold is attributed, not hidden in the profile term')
@@ -170,11 +177,32 @@ test('an operator that flags every stop as a timepoint is not holding everywhere
   assert.equal(p.deviation, -240, 'a train running early stays early')
   assert.deepEqual(p.heldAt, [])
 
-  // The same trip from an operator that flags selectively does hold.
+  // A selectively flagged bus timepoint holds when holds have been measured there.
   const bus = trip([5])
   assert.equal(timepointsAreInformative(bus.stops), true)
   assert.equal(holdsAt(bus, 5), true)
-  assert.ok(propagate(bus, DATE, 0, 8, -240, flatProfile(0), null).deviation >= 0)
+  assert.ok(propagate(bus, DATE, 0, 8, -240, measuredHoldsAt([5]), null).deviation >= 0)
+})
+
+test('a flagged timepoint nobody has seen a bus wait at does not hold an early bus', () => {
+  // The Muni 1 at California & Presidio: flagged, unmeasured, four and a half minutes
+  // early. Holding it moved the prediction five minutes past when it actually arrived.
+  const p = propagate(trip([5]), DATE, 0, 8, -270, flatProfile(0), null)
+  assert.deepEqual(p.heldAt, [])
+  assert.equal(p.deviation, -270, 'an early bus stays early without evidence that it waits')
+
+  const t = trip([8])
+  const out = predict({
+    trip: t,
+    serviceDate: DATE,
+    now: T0,
+    target: 8,
+    anchor: { index: 0, deviation: -270, at: T0 - 270 },
+    agencyPrediction: T0 + 8 * 120 - 270,
+    profileFor: flatProfile(0, 100),
+  })!
+  assert.ok(!out.clamps.includes('timepoint-hold'), 'the flag alone moved it to the timetable')
+  assert.ok(out.time < epochSecondsFor(DATE, t.stops[8].departure) - 200)
 })
 
 // ---------------------------------------------------------------------------
@@ -369,7 +397,7 @@ test('nothing is predicted in the past', () => {
   assert.ok(out.clamps.includes('past') || out.clamps.includes('unreachable'))
 })
 
-test('a timepoint is never predicted before its published time', () => {
+test('a timepoint measured to hold is never predicted before its published time', () => {
   const t = trip([9])
   const out = predict({
     trip: t,
@@ -377,7 +405,7 @@ test('a timepoint is never predicted before its published time', () => {
     now: T0,
     target: 9,
     anchor: { index: 0, deviation: -600, at: T0 },
-    profileFor: flatProfile(0, 500),
+    profileFor: flatProfile(0, 500, Level.SegmentDayBucket, { rate: 0.9, n: 50 }),
   })!
   assert.ok(out.time >= epochSecondsFor(DATE, t.stops[9].departure))
   assert.ok(out.clamps.includes('timepoint-hold') || out.basis.hold > 0)

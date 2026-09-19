@@ -49,11 +49,11 @@ export interface LearnedTrace {
   marked: number
   /**
    * Each joined departure as `[our time minus the agency's in seconds, samples, confidence,
-   * anchored on the vehicle's last departure]`.
+   * anchored on the vehicle's last departure, clamps that fired]`.
    * Exact zeros at confidence `none` are the agency's number passed through (no trip in the
    * timetable); zeros at `shadow` are the model running and agreeing.
    */
-  joined: [number, number, string, boolean][]
+  joined: [number, number, string, boolean, string][]
   error?: string
 }
 
@@ -103,7 +103,7 @@ export async function annotateLearned(
 
       const delta = Math.round((ms - Date.parse(p.raw)) / 1000)
       t.joined.push([delta, Math.round((p.evidence?.samples ?? 0) * 10) / 10, p.confidence,
-        p.evidence?.anchored === true])
+        p.evidence?.anchored === true, (p.evidence?.clamps ?? []).join(',')])
       // Under half a minute is not a correction anybody can act on, and marking it purple
       // would make the indicator meaningless by making it permanent.
       if (Math.abs(delta) < 30) {
