@@ -172,6 +172,8 @@ Everything not listed in the README's `.env.example`:
 | `PROFILE_CACHE_ROUTES` | `32` | Route profiles kept unpacked for predictions, least recently used out. ~2 MB each |
 | `PREDICTION_MODE` | `shadow` | `off` / `shadow` / `on` |
 | `PREDICTION_MIN_SAMPLES` | `3` | Below this, a segment offers no correction |
+| `PREDICTION_MIN_HORIZON_SECONDS` | `300` | Closer than this, the agency's time stands (boards and app). Learned times are for far-away accuracy |
+| `PREDICTION_MIN_CORRECTION_SECONDS` | `60` | Smaller corrections are not shown or applied |
 | `DEPARTURES_CORRECTED` | `false` | Apply proven corrections to `/v1/departures` itself, same envelope, for clients that don't send `corrected=`. Needs `PREDICTION_MODE=on` |
 | `ACCURACY_SAMPLE_RATE` | `0.1` | Chance a computed stop's predictions contribute one spot check. `0` turns checks off |
 | `ACCURACY_MAX_PENDING` | `2000` | Spot checks waiting on their vehicle, at most (one Redis hash) |

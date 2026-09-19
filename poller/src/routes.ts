@@ -198,7 +198,11 @@ export async function registerRoutes(app: FastifyInstance) {
             (p.evidence?.samples ?? 0) >= config.predictions.minSamples &&
             // And the spot checks agree: for this agency this far out, our times have
             // actually beaten the agency's (`accuracy.ts`).
-            isProven(agency, Date.parse(p.raw) / 1000 - nowS),
+            isProven(agency, Date.parse(p.raw) / 1000 - nowS) &&
+            // Far enough out to matter, and big enough to act on; see `learned.ts`.
+            Date.parse(p.raw) / 1000 - nowS >= config.predictions.minHorizonSeconds &&
+            Math.abs(Date.parse(p.predicted) - Date.parse(p.raw)) / 1000 >=
+              config.predictions.minCorrectionSeconds,
         )
         reply.header('x-corrected', String(corrected))
         return response

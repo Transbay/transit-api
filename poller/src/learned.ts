@@ -42,7 +42,9 @@ export interface LearnedTrace {
   cold: boolean
   /** Departures with a prediction joined to them on line and agency time. */
   matched: number
-  /** Joined, but our time was within 30s of the agency's. */
+  /** Joined, but the bus is close enough that the agency's time stands. */
+  near: number
+  /** Joined, but our time was within `minCorrectionSeconds` of the agency's. */
   small: number
   /** Joined and different, but backed by fewer than `minSamples` observations. */
   thin: number
@@ -72,7 +74,7 @@ export async function annotateLearned(
 ): Promise<number> {
   if (!config.profile.agencies.includes(agency)) return 0
 
-  const t: LearnedTrace = { stop: stopCode, predictions: 0, cold: true, matched: 0, small: 0, thin: 0, marked: 0, joined: [] }
+  const t: LearnedTrace = { stop: stopCode, predictions: 0, cold: true, matched: 0, near: 0, small: 0, thin: 0, marked: 0, joined: [] }
   trace?.push(t)
   let corrected = 0
   try {
@@ -101,12 +103,20 @@ export async function annotateLearned(
       const ms = Date.parse(p.p50)
       if (Number.isNaN(ms)) continue
 
-      const delta = Math.round((ms - Date.parse(p.raw)) / 1000)
+      const raw = Date.parse(p.raw)
+      const delta = Math.round((ms - raw) / 1000)
       t.joined.push([delta, Math.round((p.evidence?.samples ?? 0) * 10) / 10, p.confidence,
         p.evidence?.anchored === true, (p.evidence?.clamps ?? []).join(',')])
-      // Under half a minute is not a correction anybody can act on, and marking it purple
-      // would make the indicator meaningless by making it permanent.
-      if (Math.abs(delta) < 30) {
+      // The goal is accuracy from far away. Close in, the agency's time stands: nudging it
+      // every refresh as the bus pulls up is churn, not information.
+      if (raw - Date.now() < config.predictions.minHorizonSeconds * 1000) {
+        t.near++
+        continue
+      }
+
+      // Under a minute is not a correction anybody can act on, and marking it purple would
+      // make the indicator meaningless by making it permanent.
+      if (Math.abs(delta) < config.predictions.minCorrectionSeconds) {
         t.small++
         continue
       }

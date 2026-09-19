@@ -254,6 +254,14 @@ export const config = {
     /** Effective samples below which a segment never offers a correction. */
     minSamples: Number(optional('PREDICTION_MIN_SAMPLES', '3')),
     /**
+     * The point of learning is a good number while the bus is still far away. Inside this
+     * many seconds the agency's own time -- by then mostly GPS and a few stops of road --
+     * stands, on the boards and in the app, rather than being nudged every refresh.
+     */
+    minHorizonSeconds: Number(optional('PREDICTION_MIN_HORIZON_SECONDS', '300')),
+    /** Corrections smaller than this are noise to a rider and are not shown or applied. */
+    minCorrectionSeconds: Number(optional('PREDICTION_MIN_CORRECTION_SECONDS', '60')),
+    /**
      * Whether `/v1/departures` itself carries the corrections, in its usual SIRI envelope.
      *
      * Off by default because that response is what every shipped app build reads. On, only

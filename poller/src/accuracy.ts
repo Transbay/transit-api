@@ -58,8 +58,8 @@ const sec = (iso: string) => Math.floor(Date.parse(iso) / 1000)
  * Maybe set aside one prediction from a response that was computed anyway.
  *
  * Only one the model had evidence for (anything else is the agency's number with a label
- * on it), and only between two and thirty minutes out: nearer is not a prediction anyone
- * can act on, further is mostly the timetable.
+ * on it), and only from `minHorizonSeconds` (five minutes) to thirty out: that is where a
+ * learned time is supposed to earn its keep, and further is mostly the timetable.
  */
 export function maybeSample(response: PredictionResponse): void {
   const { sampleRate, maxPending } = config.accuracy
@@ -68,7 +68,11 @@ export function maybeSample(response: PredictionResponse): void {
   const now = Math.floor(Date.now() / 1000)
   const eligible = response.predictions.filter((p) => {
     const ahead = sec(p.raw) - now
-    return (p.evidence?.samples ?? 0) >= config.predictions.minSamples && ahead >= 120 && ahead <= 1800
+    return (
+      (p.evidence?.samples ?? 0) >= config.predictions.minSamples &&
+      ahead >= config.predictions.minHorizonSeconds &&
+      ahead <= 1800
+    )
   })
   if (eligible.length === 0) return
   const p = eligible[Math.floor(Math.random() * eligible.length)]
