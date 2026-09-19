@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { startAccuracy, stopAccuracy } from './accuracy.js'
+import { recordAnchors, pruneAnchors } from './anchors.js'
 import { config } from './config.js'
 import { redis } from './redis.js'
 import { fetchUpstream, fetchUpstreamProtobuf } from './upstream.js'
@@ -461,6 +462,8 @@ async function observeCycle(
   }
 
   deviationTracker.prune(at)
+  recordAnchors(deviations)
+  pruneAnchors(at)
   await eventlog.append(deviations)
 }
 

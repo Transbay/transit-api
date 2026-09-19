@@ -510,3 +510,25 @@ test('bunching is measured against the headway, not the timetable', () => {
   assert.equal(bunching(360, 340).state, 'normal')
   assert.equal(bunching(0, 100).state, 'unknown')
 })
+
+test('an unanchored walk counts only real segments, so its evidence is not pinned to zero', () => {
+  // The real ladder has nothing for index 0: there is no segment *into* the first stop.
+  const learned = flatProfile(10, 40)
+  const ladder = (i: number): Estimate => (i === 0 ? noEstimate() : learned())
+  const prop = propagate(trip(), DATE, -1, 8, 0, ladder, null)
+  assert.equal(prop.minN, 40, 'the phantom segment into stop 0 set the evidence to nothing')
+  assert.equal(prop.steps, 8)
+  assert.equal(prop.deviation, 80)
+
+  const p = predict({
+    trip: trip(),
+    serviceDate: DATE,
+    now: T0,
+    target: 8,
+    agencyPrediction: T0 + 8 * 120,
+    profileFor: ladder,
+    minSamples: 3,
+  })!
+  assert.ok(p.n >= 3, `an unanchored prediction reports its evidence: n=${p.n}`)
+  assert.notEqual(p.time, T0 + 8 * 120, 'the learned segments never reached the answer')
+})

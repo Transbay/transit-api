@@ -143,7 +143,10 @@ export function propagate(
   const heldAt: number[] = []
   let steps = 0
 
-  for (let k = fromIndex + 1; k <= toIndex && k < trip.stops.length; k++) {
+  // From the first real segment. With no anchor `fromIndex` is -1, and "the segment into
+  // stop 0" does not exist: it has no evidence, so walking it pinned `minN` to 0 and every
+  // unanchored prediction fell back to the agency's number without anyone noticing.
+  for (let k = Math.max(fromIndex + 1, 1); k <= toIndex && k < trip.stops.length; k++) {
     const est = profileFor(k)
     const before = d
     d = d + est.delta + est.slope * d

@@ -1,4 +1,5 @@
 import { redis } from './redis.js'
+import { anchorFor } from './anchors.js'
 import { config } from './config.js'
 import * as store from './profilestore.js'
 import * as scheduleIndex from './scheduleindex.js'
@@ -155,6 +156,8 @@ export interface PredictionEntry {
     estimators: Prediction['estimators']
     clamps: string[]
     disagreementSeconds: number
+    /** Whether the walk started from where the vehicle was last seen. */
+    anchored?: boolean
   }
 }
 
@@ -260,6 +263,16 @@ export async function predictionsFor(
     const bucket = Math.floor(trip.stops[target].departure / 1800) % 60
     const block = await readBlockState(agency, serviceDate, entry.vehicleId, trip.blockId)
 
+    // Where this vehicle was last seen leaving a stop, if that stop is before this one.
+    // Without it the walk starts at the trip's origin on the timetable, blind to where the
+    // bus is and to how its driver is running today.
+    const seen = anchorFor(entry.tripId, now)
+    const anchorIndex = seen ? index.positionOf(entry.tripId, seen.stopId, seen.seq) : -1
+    const anchor =
+      seen && anchorIndex >= 0 && anchorIndex < target
+        ? { index: anchorIndex, deviation: seen.deviation, at: seen.at }
+        : undefined
+
     const prediction =
       mode === 'off'
         ? null
@@ -269,6 +282,7 @@ export async function predictionsFor(
             now,
             target,
             agencyPrediction: entry.raw,
+            anchor,
             // How this producer's own estimate typically moves between now and arrival.
             // Undefined where it has not been measured, which leaves the agency estimator
             // on its pessimistic default variance — in the fusion, but unable to dominate
@@ -321,6 +335,7 @@ export async function predictionsFor(
         estimators: prediction.estimators,
         clamps: prediction.clamps,
         disagreementSeconds: prediction.disagreementSeconds,
+        anchored: anchor !== undefined,
       },
     })
   }

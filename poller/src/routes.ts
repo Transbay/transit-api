@@ -11,6 +11,7 @@ import { bartSynthesisStatus, observationStats, driftStats, feedSurvey } from '.
 import { bartBreakerStatus } from './bart.js'
 import { bridgeStatus, meetsThreshold } from './bridge.js'
 import { maybeSample, isProven, accuracyStats, provenCells } from './accuracy.js'
+import { anchorStatus } from './anchors.js'
 import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
@@ -454,6 +455,7 @@ export async function registerRoutes(app: FastifyInstance) {
           // The spot checks, and the agency/horizon cells they have proven. Only those
           // cells' corrections reach the app.
           accuracy: { ...accuracyStats, proven: provenCells() },
+          anchors: anchorStatus(),
           feed: feedSurvey(),
         },
         budget,
