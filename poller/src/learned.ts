@@ -2,6 +2,7 @@ import { predictionsFor } from './predictions.js'
 import { joinKey } from './correction.js'
 import { config } from './config.js'
 import { maybeSample } from './accuracy.js'
+import { worthShowing, steadyKey } from './steady.js'
 
 /**
  * The profile, applied to a board.
@@ -107,16 +108,16 @@ export async function annotateLearned(
       const delta = Math.round((ms - raw) / 1000)
       t.joined.push([delta, Math.round((p.evidence?.samples ?? 0) * 10) / 10, p.confidence,
         p.evidence?.anchored === true, (p.evidence?.clamps ?? []).join(',')])
-      // The goal is accuracy from far away. Close in, the agency's time stands: nudging it
-      // every refresh as the bus pulls up is churn, not information.
+      // Only if configured to leave close-in times alone; by default a measured bias is
+      // corrected at any distance.
       if (raw - Date.now() < config.predictions.minHorizonSeconds * 1000) {
         t.near++
         continue
       }
 
-      // Under a minute is not a correction anybody can act on, and marking it purple would
-      // make the indicator meaningless by making it permanent.
-      if (Math.abs(delta) < config.predictions.minCorrectionSeconds) {
+      // Too small to act on -- and once shown, kept until it is clearly gone, so a time
+      // hovering at the threshold does not flicker (`steady.ts`).
+      if (!worthShowing(steadyKey(agency, stopCode, p.tripId), delta)) {
         t.small++
         continue
       }

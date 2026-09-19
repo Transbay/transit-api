@@ -58,8 +58,9 @@ const sec = (iso: string) => Math.floor(Date.parse(iso) / 1000)
  * Maybe set aside one prediction from a response that was computed anyway.
  *
  * Only one the model had evidence for (anything else is the agency's number with a label
- * on it), and only from `minHorizonSeconds` (five minutes) to thirty out: that is where a
- * learned time is supposed to earn its keep, and further is mostly the timetable.
+ * on it), and only from two minutes to thirty out: nearer has no time left to be wrong in,
+ * and further is mostly the timetable. Scored by horizon, so the near-term corrections a
+ * rider acts on are judged separately from the far ones.
  */
 export function maybeSample(response: PredictionResponse): void {
   const { sampleRate, maxPending } = config.accuracy
@@ -70,7 +71,7 @@ export function maybeSample(response: PredictionResponse): void {
     const ahead = sec(p.raw) - now
     return (
       (p.evidence?.samples ?? 0) >= config.predictions.minSamples &&
-      ahead >= config.predictions.minHorizonSeconds &&
+      ahead >= Math.max(120, config.predictions.minHorizonSeconds) &&
       ahead <= 1800
     )
   })

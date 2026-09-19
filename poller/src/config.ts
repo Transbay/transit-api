@@ -254,13 +254,17 @@ export const config = {
     /** Effective samples below which a segment never offers a correction. */
     minSamples: Number(optional('PREDICTION_MIN_SAMPLES', '3')),
     /**
-     * The point of learning is a good number while the bus is still far away. Inside this
-     * many seconds the agency's own time -- by then mostly GPS and a few stops of road --
-     * stands, on the boards and in the app, rather than being nudged every refresh.
+     * Closer than this, the agency's time stands. Zero by default: a consistent, measured
+     * bias -- Muni always allowing the N a minute too long from Carl & Cole to Duboce --
+     * matters most close in, where people act on it. Churn is handled by `steady.ts`, not
+     * by refusing to correct.
      */
-    minHorizonSeconds: Number(optional('PREDICTION_MIN_HORIZON_SECONDS', '300')),
-    /** Corrections smaller than this are noise to a rider and are not shown or applied. */
-    minCorrectionSeconds: Number(optional('PREDICTION_MIN_CORRECTION_SECONDS', '60')),
+    minHorizonSeconds: Number(optional('PREDICTION_MIN_HORIZON_SECONDS', '0')),
+    /**
+     * Smallest correction worth starting to show. Once shown, one stays until it falls
+     * below half of this (`steady.ts`), so a time does not flicker in and out of purple.
+     */
+    minCorrectionSeconds: Number(optional('PREDICTION_MIN_CORRECTION_SECONDS', '30')),
     /**
      * Whether `/v1/departures` itself carries the corrections, in its usual SIRI envelope.
      *

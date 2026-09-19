@@ -560,3 +560,25 @@ test('an unanchored walk counts only real segments, so its evidence is not pinne
   assert.ok(p.n >= 3, `an unanchored prediction reports its evidence: n=${p.n}`)
   assert.notEqual(p.time, T0 + 8 * 120, 'the learned segments never reached the answer')
 })
+
+test("a well-measured agency bias survives thin segments: the N's extra minute is shown", () => {
+  // Muni allows the N a minute too long, measured 300 times at this horizon; the segments
+  // on the way have only 4 samples each and agree with the timetable.
+  const t = trip([])
+  const scheduled = epochSecondsFor(DATE, t.stops[8].departure)
+  const out = predict({
+    trip: t,
+    serviceDate: DATE,
+    now: T0,
+    target: 8,
+    anchor: { index: 0, deviation: 0, at: T0 },
+    agencyPrediction: scheduled,
+    agencyError: { mean: -60, variance: 400, n: 300 },
+    profileFor: flatProfile(0, 4),
+    minSamples: 3,
+  })!
+  assert.ok(out.correctionSeconds <= -40,
+    `tempered by the segments' four samples instead of the bias's 300: ${out.correctionSeconds}s`)
+  assert.ok(out.correctionSeconds >= -65)
+  assert.ok(out.n >= 3, 'and it reports the evidence it actually has')
+})

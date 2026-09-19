@@ -12,6 +12,7 @@ import { bartBreakerStatus } from './bart.js'
 import { bridgeStatus, meetsThreshold } from './bridge.js'
 import { maybeSample, isProven, accuracyStats, provenCells } from './accuracy.js'
 import { anchorStatus } from './anchors.js'
+import { worthShowing, steadyKey } from './steady.js'
 import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
@@ -199,10 +200,12 @@ export async function registerRoutes(app: FastifyInstance) {
             // And the spot checks agree: for this agency this far out, our times have
             // actually beaten the agency's (`accuracy.ts`).
             isProven(agency, Date.parse(p.raw) / 1000 - nowS) &&
-            // Far enough out to matter, and big enough to act on; see `learned.ts`.
             Date.parse(p.raw) / 1000 - nowS >= config.predictions.minHorizonSeconds &&
-            Math.abs(Date.parse(p.predicted) - Date.parse(p.raw)) / 1000 >=
-              config.predictions.minCorrectionSeconds,
+            // Big enough to act on, and steady once shown; see `steady.ts`.
+            worthShowing(
+              steadyKey(agency, stopCode, p.tripId),
+              (Date.parse(p.predicted) - Date.parse(p.raw)) / 1000,
+            ),
         )
         reply.header('x-corrected', String(corrected))
         return response

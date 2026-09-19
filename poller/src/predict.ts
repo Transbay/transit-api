@@ -355,13 +355,33 @@ export function predict(input: PredictInput): Prediction | null {
   const fused = fuse(estimators)
   if (!fused) return null
 
+  // The evidence behind each estimator, in its own terms: segments walked for the profile,
+  // measured errors for the agency's bias, segments seen today for the block.
+  const evidenceOf = (name: Estimator['name']): number =>
+    name === 'profile'
+      ? prop.minN
+      : name === 'agency'
+        ? input.agencyError && input.agencyError.n >= 20 ? input.agencyError.n : 0
+        : (input.block?.observed ?? 0)
+  const weightOf = (name: Estimator['name']) =>
+    fused.weights.find((w) => w.name === name)?.weight ?? 0
+  /** The fused estimate's evidence: each estimator's, weighted by how much it counted. */
+  const nEff = estimators.reduce((sum, e) => sum + weightOf(e.name) * evidenceOf(e.name), 0)
+
   // --- clamps -------------------------------------------------------------
   let time = fused.time
 
   const correctionBefore = raw === undefined ? 0 : time - raw
   if (raw !== undefined) {
     const cap = correctionCap(raw - now)
-    const tempered = temper(correctionBefore, prop.minN)
+    // Each estimator's pull is shrunk by its own evidence. Tempering the whole correction
+    // by the profile's count shrank a well-measured agency bias -- Muni allowing the N a
+    // minute too long, seen hundreds of times -- to a few seconds whenever the segments
+    // on the way were thin.
+    const tempered = estimators.reduce(
+      (sum, e) => sum + weightOf(e.name) * temper(e.time - raw, evidenceOf(e.name)),
+      0,
+    )
     if (Math.abs(tempered) < Math.abs(correctionBefore)) clamps.push('tempered')
     let applied = tempered
     if (Math.abs(applied) > cap) {
@@ -402,7 +422,7 @@ export function predict(input: PredictInput): Prediction | null {
 
   const disagreementSeconds = disagreement(estimators)
   const confidence = confidenceOf({
-    n: prop.minN,
+    n: nEff,
     level: prop.bestLevel,
     estimators: estimators.length,
     disagreementSeconds,
@@ -429,7 +449,7 @@ export function predict(input: PredictInput): Prediction | null {
       weight: Number(w.weight.toFixed(3)),
     })),
     clamps,
-    n: Math.round(prop.minN),
+    n: Math.round(nEff * 10) / 10,
     level: prop.bestLevel,
     disagreementSeconds: Math.round(disagreementSeconds),
   }
