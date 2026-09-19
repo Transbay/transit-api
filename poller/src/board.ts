@@ -3,7 +3,7 @@ import { readSnapshot, knownAgencies } from './snapshot.js'
 import { loadStopTable } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
 import { page, esc, jsonLiteral } from './chrome.js'
-import { annotateLearned, LEARNED_STYLE, type Learnable } from './learned.js'
+import { annotateLearned, LEARNED_STYLE, type Learnable, type LearnedTrace } from './learned.js'
 
 /**
  * A departure board for any operator, at any stop.
@@ -86,6 +86,8 @@ interface BoardData {
   lines: string[]
   /** How many departures the profile actually moved. */
   corrected: number
+  /** Where the rest fell out; see `LearnedTrace`. */
+  learned: LearnedTrace[]
 }
 
 async function build(
@@ -126,7 +128,8 @@ async function build(
   }
 
   // The profile, applied. See `annotateLearned` for what earns the purple.
-  const corrected = await annotateLearned(upper, stopCode, departures)
+  const learned: LearnedTrace[] = []
+  const corrected = await annotateLearned(upper, stopCode, departures, learned)
 
   return {
     agency: upper,
@@ -138,6 +141,7 @@ async function build(
     departures,
     lines,
     corrected,
+    learned,
   }
 }
 

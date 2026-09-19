@@ -3,7 +3,7 @@ import { readSnapshot, readVehicles } from './snapshot.js'
 import { loadBartGeometry } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
 import { page, esc, jsonLiteral } from './chrome.js'
-import { annotateLearned, LEARNED_STYLE, type Learnable } from './learned.js'
+import { annotateLearned, LEARNED_STYLE, type Learnable, type LearnedTrace } from './learned.js'
 
 // A public BART board, for checking the position estimate against reality.
 //
@@ -128,6 +128,7 @@ export async function registerBartBoard(app: FastifyInstance): Promise<void> {
     // Departures across every platform of the station.
     const departures: Departure[] = []
     let ageSeconds: number | null = null
+    const learned: LearnedTrace[] = []
     for (const stopId of station.stopIds) {
       const snap = await readSnapshot('BA', stopId)
       if (!snap) continue
@@ -139,7 +140,7 @@ export async function registerBartBoard(app: FastifyInstance): Promise<void> {
         if (d) platform.push(d)
       }
       // Per platform, because predictions are indexed per stop, and a station is several.
-      await annotateLearned('BA', stopId, platform)
+      await annotateLearned('BA', stopId, platform, learned)
       departures.push(...platform)
     }
 
@@ -186,6 +187,7 @@ export async function registerBartBoard(app: FastifyInstance): Promise<void> {
       departures: filtered,
       /** How many of the departures shown the profile moved; drives the purple banner. */
       corrected: filtered.filter((d) => d.correctedMs !== undefined).length,
+      learned,
       trains: trains.slice(0, 12),
     }
   }

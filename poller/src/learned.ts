@@ -32,6 +32,25 @@ export interface Learnable {
 }
 
 /**
+ * Where a board's departures fell out of the purple, stage by stage. Returned in the
+ * boards' JSON so a board with no purple says why without anyone needing server access.
+ */
+export interface LearnedTrace {
+  stop: string
+  /** Predictions the model returned for this stop, and how many were cold (no profile). */
+  predictions: number
+  cold: boolean
+  /** Departures with a prediction joined to them on line and agency time. */
+  matched: number
+  /** Joined, but our time was within 30s of the agency's. */
+  small: number
+  /** Joined and different, but backed by fewer than `minSamples` observations. */
+  thin: number
+  marked: number
+  error?: string
+}
+
+/**
  * Marks each departure the profile would move, and returns how many it marked.
  *
  * Wrapped because the learned half must never be able to break the live half: a warehouse
@@ -42,13 +61,18 @@ export async function annotateLearned(
   agency: string,
   stopCode: string,
   departures: Learnable[],
+  trace?: LearnedTrace[],
 ): Promise<number> {
   if (!config.profile.agencies.includes(agency)) return 0
 
+  const t: LearnedTrace = { stop: stopCode, predictions: 0, cold: true, matched: 0, small: 0, thin: 0, marked: 0 }
+  trace?.push(t)
   let corrected = 0
   try {
     const predicted = await predictionsFor(agency, stopCode)
     maybeSample(predicted)
+    t.predictions = predicted.predictions.length
+    t.cold = predicted.cold
 
     // Joined on line and the agency's own time; see `joinKey` for why not the trip id.
     const byKey = new Map(
@@ -58,6 +82,7 @@ export async function annotateLearned(
     for (const d of departures) {
       const p = byKey.get(joinKey(d.line, d.epochMs))
       if (!p) continue
+      t.matched++
 
       // `p50` rather than `predicted`, deliberately.
       //
@@ -72,7 +97,10 @@ export async function annotateLearned(
       const delta = Math.round((ms - Date.parse(p.raw)) / 1000)
       // Under half a minute is not a correction anybody can act on, and marking it purple
       // would make the indicator meaningless by making it permanent.
-      if (Math.abs(delta) < 30) continue
+      if (Math.abs(delta) < 30) {
+        t.small++
+        continue
+      }
 
       // And it must actually have been learned from something.
       //
@@ -82,7 +110,10 @@ export async function annotateLearned(
       // the scheduled second, so the board was drawing the timetable in purple and calling
       // it learned. A marker that means "we know something" has to be backed by something.
       const samples = p.evidence?.samples ?? 0
-      if (samples < config.predictions.minSamples) continue
+      if (samples < config.predictions.minSamples) {
+        t.thin++
+        continue
+      }
 
       d.correctedMs = ms
       d.correctionSeconds = delta
@@ -92,9 +123,11 @@ export async function annotateLearned(
       if (Math.abs(blk) >= 15) d.blockSeconds = blk
       corrected++
     }
-  } catch {
+  } catch (err) {
     // No corrections today.
+    t.error = (err as Error).message
   }
+  t.marked = corrected
   return corrected
 }
 
