@@ -47,8 +47,12 @@ export interface LearnedTrace {
   /** Joined and different, but backed by fewer than `minSamples` observations. */
   thin: number
   marked: number
-  /** Our time minus the agency's, seconds, for each joined departure: agreement or collapse? */
-  deltas: number[]
+  /**
+   * Each joined departure as `[our time minus the agency's in seconds, samples, confidence]`.
+   * Exact zeros at confidence `none` are the agency's number passed through (no trip in the
+   * timetable); zeros at `shadow` are the model running and agreeing.
+   */
+  joined: [number, number, string][]
   error?: string
 }
 
@@ -67,7 +71,7 @@ export async function annotateLearned(
 ): Promise<number> {
   if (!config.profile.agencies.includes(agency)) return 0
 
-  const t: LearnedTrace = { stop: stopCode, predictions: 0, cold: true, matched: 0, small: 0, thin: 0, marked: 0, deltas: [] }
+  const t: LearnedTrace = { stop: stopCode, predictions: 0, cold: true, matched: 0, small: 0, thin: 0, marked: 0, joined: [] }
   trace?.push(t)
   let corrected = 0
   try {
@@ -97,7 +101,7 @@ export async function annotateLearned(
       if (Number.isNaN(ms)) continue
 
       const delta = Math.round((ms - Date.parse(p.raw)) / 1000)
-      t.deltas.push(delta)
+      t.joined.push([delta, Math.round((p.evidence?.samples ?? 0) * 10) / 10, p.confidence])
       // Under half a minute is not a correction anybody can act on, and marking it purple
       // would make the indicator meaningless by making it permanent.
       if (Math.abs(delta) < 30) {
