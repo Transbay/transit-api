@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { startAccuracy, stopAccuracy } from './accuracy.js'
 import { config } from './config.js'
 import { redis } from './redis.js'
 import { fetchUpstream, fetchUpstreamProtobuf } from './upstream.js'
@@ -658,6 +659,7 @@ export function startPoller(): void {
   if (config.profile.enabled) {
     // Bound to this instance's lease, so a replica that is not polling also does not learn.
     startLearner(instanceId)
+    startAccuracy(() => isLeader(stepMs() * 3))
     void warehouse.connect().then(() => scheduleIndex.refresh(true))
   }
 
@@ -678,6 +680,7 @@ export function startPoller(): void {
 export async function stopPoller(): Promise<void> {
   if (timer) { clearInterval(timer); timer = null }
   if (staticTimer) { clearInterval(staticTimer); staticTimer = null }
+  stopAccuracy()
   await stopLearner()
   await warehouse.close()
   // Release the lock on a clean shutdown so a redeploy's replacement can start

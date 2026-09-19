@@ -10,6 +10,7 @@ import { staticStatus, retainedArchive } from './gtfs.js'
 import { bartSynthesisStatus, observationStats, driftStats, feedSurvey } from './poller.js'
 import { bartBreakerStatus } from './bart.js'
 import { bridgeStatus, meetsThreshold } from './bridge.js'
+import { maybeSample, isProven, accuracyStats, provenCells } from './accuracy.js'
 import { registerBartBoard } from './bartboard.js'
 import { registerAnalysis } from './analysis.js'
 import { registerDash } from './dash.js'
@@ -143,24 +144,33 @@ export async function registerRoutes(app: FastifyInstance) {
     /**
      * Predictions per stop, reused for a few seconds.
      *
-     * Only consulted when `DEPARTURES_CORRECTED` is on, where every departures request would
-     * otherwise run the model. Fifteen seconds is one poll interval: nothing it reads can have
+     * Only consulted when a departures request wants corrections -- `DEPARTURES_CORRECTED`,
+     * or a client asking with `corrected=1` -- where every such request would otherwise run
+     * the model. Fifteen seconds is one poll interval: nothing it reads can have
      * changed sooner.
      */
     const predictionMemo = new Map<string, { at: number; value: Promise<PredictionResponse> }>()
     const memoPredictions = (agency: string, stopCode: string) => {
       const key = `${agency}:${stopCode}`
+      const now = Date.now()
       const hit = predictionMemo.get(key)
-      if (hit && Date.now() - hit.at < 15_000) return hit.value
-      if (predictionMemo.size > 5000) predictionMemo.clear()
+      if (hit && now - hit.at < 15_000) return hit.value
+      // Bounded by what is actually fresh. A response is some tens of kilobytes, so the old
+      // 5000-entry ceiling, cleared only when reached, could hold a couple of hundred MB of
+      // expired answers once many people had the setting on. Expired entries go first;
+      // 500 live ones is a busy fifteen seconds.
+      if (predictionMemo.size >= 500) {
+        for (const [k, v] of predictionMemo) if (now - v.at >= 15_000) predictionMemo.delete(k)
+        if (predictionMemo.size >= 500) predictionMemo.clear()
+      }
       const value = predictionsFor(agency, stopCode)
-      value.catch(() => predictionMemo.delete(key))
-      predictionMemo.set(key, { at: Date.now(), value })
+      value.then(maybeSample, () => predictionMemo.delete(key))
+      predictionMemo.set(key, { at: now, value })
       return value
     }
 
     /**
-     * The agency's response, with learned times applied when `DEPARTURES_CORRECTED` is on.
+     * The agency's response, with learned times applied when `wanted`.
      *
      * Only what `/v1/predictions` would claim at the bridge's confidence floor is applied,
      * and any failure returns the response untouched: the learned half may cost a correction,
@@ -171,18 +181,23 @@ export async function registerRoutes(app: FastifyInstance) {
       stopCode: string,
       body: unknown,
       reply: { header: (k: string, v: string) => unknown },
+      wanted: boolean,
     ): Promise<unknown> => {
-      if (!config.predictions.correctDepartures || !config.profile.agencies.includes(agency)) {
+      if (!wanted || !config.profile.agencies.includes(agency)) {
         return body
       }
       try {
         const predicted = await memoPredictions(agency, stopCode)
+        const nowS = Date.now() / 1000
         const { response, corrected } = applyCorrections(
           body as SIRIResponse,
           predicted.predictions,
           (p) =>
             meetsThreshold(p.confidence) &&
-            (p.evidence?.samples ?? 0) >= config.predictions.minSamples,
+            (p.evidence?.samples ?? 0) >= config.predictions.minSamples &&
+            // And the spot checks agree: for this agency this far out, our times have
+            // actually beaten the agency's (`accuracy.ts`).
+            isProven(agency, Date.parse(p.raw) / 1000 - nowS),
         )
         reply.header('x-corrected', String(corrected))
         return response
@@ -193,13 +208,22 @@ export async function registerRoutes(app: FastifyInstance) {
     }
 
     /** The only endpoint under real load. */
-    secured.get<{ Querystring: { agency?: string; stopcode?: string } }>(
+    secured.get<{ Querystring: { agency?: string; stopcode?: string; corrected?: string } }>(
       '/v1/departures',
       async (request, reply) => {
         const { agency, stopcode: stopCode } = request.query
         if (!agency || !stopCode) {
           return reply.code(400).send({ error: 'agency and stopcode are required' })
         }
+
+        // A client that knows about learned times says which it wants: the app's "Use
+        // improved predictions" setting. One that does not -- every build shipped before
+        // that setting -- gets whatever `DEPARTURES_CORRECTED` says, exactly as before.
+        // Either way only proven corrections apply, so `corrected=1` still moves nothing
+        // until `PREDICTION_MODE=on` and the scoreboard have promoted some.
+        const { corrected } = request.query
+        const wanted =
+          corrected === '1' ? true : corrected === '0' ? false : config.predictions.correctDepartures
 
         let snapshot = null
         try {
@@ -214,7 +238,7 @@ export async function registerRoutes(app: FastifyInstance) {
         if (fresh) {
           reply.header('x-source', 'snapshot')
           reply.header('x-snapshot-age', String(snapshot!.ageSeconds))
-          return withCorrections(agency, stopCode, snapshot!.response, reply)
+          return withCorrections(agency, stopCode, snapshot!.response, reply, wanted)
         }
 
         // The snapshot is stale, or we have none. Spend a request only if allowed to.
@@ -229,7 +253,7 @@ export async function registerRoutes(app: FastifyInstance) {
             reply.header('x-source', 'live')
             reply.header('x-cache', result.outcome)
             if (result.outcome === 'stale') reply.header('x-data-stale', 'true')
-            return withCorrections(agency, stopCode, result.value, reply)
+            return withCorrections(agency, stopCode, result.value, reply, wanted)
           } catch (err) {
             // Budget exhausted or 511 unreachable. An aged snapshot beats an error:
             // times a couple of minutes old are still useful, a spinner is not.
@@ -241,7 +265,7 @@ export async function registerRoutes(app: FastifyInstance) {
         reply.header('x-source', 'snapshot')
         reply.header('x-snapshot-age', String(snapshot!.ageSeconds))
         reply.header('x-data-stale', 'true')
-        return withCorrections(agency, stopCode, snapshot!.response, reply)
+        return withCorrections(agency, stopCode, snapshot!.response, reply, wanted)
       },
     )
 
@@ -267,7 +291,9 @@ export async function registerRoutes(app: FastifyInstance) {
             profiled: config.profile.agencies,
           })
         }
-        return predictionsFor(agency, stopCode)
+        const predicted = await predictionsFor(agency, stopCode)
+        maybeSample(predicted)
+        return predicted
       },
     )
 
@@ -425,6 +451,9 @@ export async function registerRoutes(app: FastifyInstance) {
           // the model of the converged answers it measures against.
           drift: driftStats(),
           agencyError: agencyerror.status(),
+          // The spot checks, and the agency/horizon cells they have proven. Only those
+          // cells' corrections reach the app.
+          accuracy: { ...accuracyStats, proven: provenCells() },
           feed: feedSurvey(),
         },
         budget,

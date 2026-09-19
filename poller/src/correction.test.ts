@@ -65,6 +65,13 @@ test('only accepted predictions move a time, and arrival moves with departure', 
   assert.equal(call(0).ExpectedArrivalTime, '2026-09-09T18:11:00Z', 'dwell was not preserved')
   assert.equal(call(1).ExpectedDepartureTime, '2026-09-09T18:12:00Z', 'a low-confidence correction was applied')
   assert.equal(call(2).ExpectedDepartureTime, '2026-09-09T18:20:00Z', 'the wrong 14 moved')
+  // A moved visit says so, and keeps the agency's time; an unmoved one says nothing.
+  assert.deepEqual(call(0).Extensions, {
+    Adjusted: true,
+    AgencyExpectedDepartureTime: '2026-09-09T18:10:00Z',
+  })
+  assert.equal(call(1).Extensions, undefined)
+  assert.equal(call(2).Extensions, undefined)
   // The caller's copy -- possibly a cached response -- is still the agency's.
   assert.equal(JSON.stringify(input), before)
 })

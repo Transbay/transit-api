@@ -225,6 +225,15 @@ export const config = {
      * rule is enforced rather than merely stated.
      */
     streamMaxLen: Number(optional('PROFILE_STREAM_MAXLEN', '200000')),
+    /**
+     * Route profiles kept unpacked in memory for predictions, most recently used.
+     *
+     * Each is ~2 MB unpacked (measured: an average 430 KB blob unpacks to 1.8-2.6 MB), and
+     * one stop's predictions touch two per route serving it -- its day type and the pooled
+     * rung. 32 is ~55-85 MB. Past it, the least recently used is re-read from Redis when
+     * next asked for, which costs a round trip rather than memory.
+     */
+    cacheRoutes: Number(optional('PROFILE_CACHE_ROUTES', '32')),
   },
 
   /**
@@ -254,6 +263,24 @@ export const config = {
      * Turning it off again returns the agency's raw times on the next request.
      */
     correctDepartures: optional('DEPARTURES_CORRECTED', 'false') === 'true',
+  },
+
+  /**
+   * Random spot checks of predictions against what the vehicle then did (`accuracy.ts`).
+   *
+   * Only predictions already computed for a request are sampled, so this adds no
+   * prediction work; the cost is one small Redis hash and a row per resolved check.
+   */
+  accuracy: {
+    /** Chance that a computed stop's predictions contribute one check. `0` turns it off. */
+    sampleRate: Number(optional('ACCURACY_SAMPLE_RATE', '0.1')),
+    /** Checks waiting on their vehicle, at most. Past it, sampling pauses. */
+    maxPending: Number(optional('ACCURACY_MAX_PENDING', '2000')),
+    /**
+     * Checks over the last fortnight, per agency and horizon, before our time may be shown
+     * in place of the agency's -- and then only where our median miss is the smaller.
+     */
+    minChecks: Number(optional('ACCURACY_MIN_CHECKS', '50')),
   },
 
   /**

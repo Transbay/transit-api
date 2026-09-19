@@ -34,6 +34,10 @@ function isoSeconds(epochMs: number): string {
  *
  * Arrival and departure move by the same amount, so a visit's dwell is preserved. A visit
  * with no matching accepted prediction is returned exactly as it came.
+ *
+ * A moved visit also says so, in `MonitoredCall.Extensions`: `Adjusted: true` and the
+ * agency's own time. That is what lets a client mark the time as ours rather than pass it
+ * off as the agency's. Builds that predate it decode past unknown keys.
  */
 export function applyCorrections(
   response: SIRIResponse,
@@ -68,6 +72,13 @@ export function applyCorrections(
 
     const shift = shifts.get(joinKey(line, Date.parse(expected)))
     if (shift === undefined) continue
+
+    const ext = (call.Extensions ?? {}) as Record<string, unknown>
+    call.Extensions = {
+      ...ext,
+      Adjusted: true,
+      AgencyExpectedDepartureTime: isoSeconds(Date.parse(expected)),
+    }
 
     for (const field of ['ExpectedDepartureTime', 'ExpectedArrivalTime']) {
       const value = call[field]

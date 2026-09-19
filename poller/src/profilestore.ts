@@ -1,3 +1,4 @@
+import { config } from './config.js'
 import { redis } from './redis.js'
 import { packProfile, unpackProfile, type PackedSegment } from './profile.js'
 import type { DayType } from './servicedate.js'
@@ -80,6 +81,22 @@ interface CacheEntry {
  * minutes at most.
  */
 const cache = new Map<string, CacheEntry>()
+
+/**
+ * Most-recently-used first out of the door last: a Map iterates in insertion order, so a
+ * hit is re-inserted at the end and the oldest key is the first one.
+ *
+ * Bounded because the whole profile is hundreds of megabytes packed and several times that
+ * unpacked (~2 MB per route and day type), and requests wander: without a ceiling, every route anybody ever asked
+ * about stayed unpacked in this process until the next deploy.
+ */
+function remember(k: string, entry: CacheEntry): void {
+  cache.delete(k)
+  cache.set(k, entry)
+  while (cache.size > config.profile.cacheRoutes) {
+    cache.delete(cache.keys().next().value!)
+  }
+}
 let cachedVersion = ''
 let versionCheckedAt = 0
 
@@ -112,6 +129,7 @@ export async function load(
   if (hit && hit.version === version) {
     profileStoreStats.reads++
     profileStoreStats.hits++
+    remember(k, hit)
     return hit.segments
   }
 
@@ -119,7 +137,7 @@ export async function load(
   try {
     const blob = await redis.getBuffer(k)
     const segments = blob ? unpackProfile(blob) : new Map<string, PackedSegment>()
-    cache.set(k, { version, segments })
+    remember(k, { version, segments })
     return segments
   } catch (err) {
     console.error('[profilestore] read failed:', (err as Error).message)

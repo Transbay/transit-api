@@ -3,9 +3,7 @@ import { readSnapshot, knownAgencies } from './snapshot.js'
 import { loadStopTable } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
 import { page, esc, jsonLiteral } from './chrome.js'
-import { predictionsFor } from './predictions.js'
-import { joinKey } from './correction.js'
-import { config } from './config.js'
+import { annotateLearned, LEARNED_STYLE, type Learnable } from './learned.js'
 
 /**
  * A departure board for any operator, at any stop.
@@ -26,31 +24,14 @@ import { config } from './config.js'
  * are matched by their own routes before this one is considered.
  */
 
-interface Departure {
-  line: string
+interface Departure extends Learnable {
   destination: string
-  /** The agency's own time. Never overwritten. */
-  epochMs: number
   platform: string | null
   vehicle: string | null
   /** Present only where the producer publishes it; BART does, most do not. */
   delaySeconds: number | null
   occupancy: string | null
   tripId: string | null
-  /** Set only where the profile had something to say. */
-  correctedMs?: number
-  correctionSeconds?: number
-  confidence?: string
-  samples?: number
-  /**
-   * The same-day vehicle term, in seconds.
-   *
-   * This is the driver running consistently hot or cold today, measured as a residual
-   * against what the profile expected rather than against the timetable -- so a bus on a
-   * genuinely slow corridor is not mistaken for a slow driver. Surfaced because it is the
-   * part of a correction a reader can sanity-check from the platform.
-   */
-  blockSeconds?: number
 }
 
 function str(v: unknown): string {
@@ -144,58 +125,8 @@ async function build(
     // A board without a stop name is still a board.
   }
 
-  // The profile, applied. Wrapped because the learned half must never be able to break the
-  // live half: a warehouse that is down, cold or wrong costs the corrections and nothing
-  // else, and the board still shows exactly what the agency said.
-  let corrected = 0
-  try {
-    const predicted = await predictionsFor(upper, stopCode)
-
-    // Joined on line and the agency's own time; see `joinKey` for why not the trip id.
-    const byKey = new Map(
-      predicted.predictions.map((p) => [joinKey(p.lineRef, Date.parse(p.raw)), p]),
-    )
-
-    for (const d of departures) {
-      const p = byKey.get(joinKey(d.line, d.epochMs))
-      if (!p) continue
-
-      // `p50` rather than `predicted`, deliberately.
-      //
-      // In shadow mode `predicted` is the agency's own time: the gate is about what the
-      // public API is willing to *claim*, and that gate should not be weakened to make an
-      // internal page more interesting. But the model's actual estimate is still there in
-      // `p50`, and this page exists to show it -- marked, in purple, next to the agency's
-      // number, so it can be argued with. `/v1/departures` is untouched either way.
-      const ms = Date.parse(p.p50)
-      if (Number.isNaN(ms)) continue
-
-      const delta = Math.round((ms - Date.parse(p.raw)) / 1000)
-      // Under half a minute is not a correction anybody can act on, and marking it purple
-      // would make the indicator meaningless by making it permanent.
-      if (Math.abs(delta) < 30) continue
-
-      // And it must actually have been learned from something.
-      //
-      // `predict` accepts an estimate with no evidence when the target needs no propagation
-      // (predict.ts, `prop.steps === 0`), which is defensible for an API that reports its
-      // own sample count. It is not defensible here: every such correction was landing on
-      // the scheduled second, so the board was drawing the timetable in purple and calling
-      // it learned. A marker that means "we know something" has to be backed by something.
-      const samples = p.evidence?.samples ?? 0
-      if (samples < config.predictions.minSamples) continue
-
-      d.correctedMs = ms
-      d.correctionSeconds = delta
-      d.confidence = p.confidence
-      d.samples = p.evidence?.samples
-      const blk = Math.round(p.basis?.block ?? 0)
-      if (Math.abs(blk) >= 15) d.blockSeconds = blk
-      corrected++
-    }
-  } catch {
-    // No corrections today.
-  }
+  // The profile, applied. See `annotateLearned` for what earns the purple.
+  const corrected = await annotateLearned(upper, stopCode, departures)
 
   return {
     agency: upper,
@@ -273,9 +204,6 @@ const STYLE = `
 .dep.learned { border:1px solid #8B6BF066; border-radius:12px; background:#8B6BF012;
                padding:.75rem .85rem; margin:.35rem 0; }
 .dep.learned + .dep { border-top:none; }
-.tag { display:inline-block; font-size:.62rem; letter-spacing:.09em; text-transform:uppercase;
-       font-weight:700; color:#A78BFA; border:1px solid #8B6BF055; border-radius:5px;
-       padding:0 .3rem; margin-left:.4rem; vertical-align:.08em; }
 .line { font-family:var(--font-display); font-weight:700; font-size:1rem; min-width:3.1rem;
         padding:.3rem .55rem; border-radius:10px; text-align:center;
         background:color-mix(in srgb, var(--accent) 18%, transparent);
@@ -285,15 +213,7 @@ const STYLE = `
 .cd { font-family:var(--font-display); font-weight:600; font-size:1.4rem;
       font-variant-numeric:tabular-nums; text-align:right; min-width:4.4rem; }
 .cd.now { color:#4ADE80; }
-.cd.learned { color:#A78BFA; }
-.was { display:block; font-size:.7rem; color:var(--ink-faint); font-weight:400;
-       font-family:var(--font-body); }
-.banner { display:flex; align-items:center; gap:.55rem; padding:.6rem .85rem;
-          border-radius:12px; margin-bottom:1rem; font-size:.84rem; }
-.banner.learned { border:1px solid #8B6BF055; background:#8B6BF014; color:#A78BFA; }
-.banner.learned a { color:#C4B5FD; text-decoration:underline; }
 .banner.stale { border:1px solid #7a5a20; background:#3a2a1233; color:#FBBF24; }
-.pdot { width:8px; height:8px; border-radius:50%; background:#8B6BF0; flex:none; }
 .lines { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:1rem; }
 .lines a { font-size:.8rem; padding:.2rem .6rem; border:1px solid var(--edge);
            border-radius:999px; color:var(--ink-dim); }
@@ -412,7 +332,7 @@ setInterval(refresh, 15000);
       `${esc(d.agency)} · Stop ${esc(d.stopCode)}` +
       (d.routeFilter ? ` · Line ${esc(d.routeFilter)}` : ''),
     headerRight: '<span class="chip"><span class="dot"></span>Live</span>',
-    style: STYLE,
+    style: STYLE + LEARNED_STYLE,
     script,
   })
 }

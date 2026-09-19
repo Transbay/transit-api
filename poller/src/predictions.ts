@@ -107,7 +107,19 @@ export async function writeIndex(agency: string, updates: TripUpdateRecord[]): P
   return byStop.size
 }
 
-async function readIndex(agency: string, stopId: string): Promise<RawDeparture[]> {
+/**
+ * Whether an agency's index is there at all. Distinguishes "this trip has left the stop"
+ * from "the feed has gone quiet", which an empty `readIndex` cannot.
+ */
+export async function indexExists(agency: string): Promise<boolean> {
+  try {
+    return (await redis.exists(`${INDEX_PREFIX}${agency}`)) === 1
+  } catch {
+    return false
+  }
+}
+
+export async function readIndex(agency: string, stopId: string): Promise<RawDeparture[]> {
   try {
     const raw = await redis.hget(`${INDEX_PREFIX}${agency}`, stopId)
     return raw ? (JSON.parse(raw) as RawDeparture[]) : []

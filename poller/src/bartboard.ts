@@ -3,6 +3,7 @@ import { readSnapshot, readVehicles } from './snapshot.js'
 import { loadBartGeometry } from './gtfs.js'
 import type { MonitoredStopVisit } from './siri.js'
 import { page, esc, jsonLiteral } from './chrome.js'
+import { annotateLearned, LEARNED_STYLE, type Learnable } from './learned.js'
 
 // A public BART board, for checking the position estimate against reality.
 //
@@ -40,11 +41,8 @@ const DIRECTIONS: Record<string, 'N' | 'S' | null> = {
   w: null, wb: null, west: null, westbound: null,
 }
 
-interface Departure {
+interface Departure extends Learnable {
   destination: string
-  line: string
-  /** Epoch milliseconds — the page counts down from this itself, once a second. */
-  epochMs: number
   platform: string | null
   cars: number | null
   delaySeconds: number | null
@@ -134,11 +132,15 @@ export async function registerBartBoard(app: FastifyInstance): Promise<void> {
       const snap = await readSnapshot('BA', stopId)
       if (!snap) continue
       ageSeconds = ageSeconds === null ? snap.ageSeconds : Math.min(ageSeconds, snap.ageSeconds)
+      const platform: Departure[] = []
       for (const v of snap.response.ServiceDelivery?.StopMonitoringDelivery
         ?.MonitoredStopVisit ?? []) {
         const d = toDeparture(v)
-        if (d) departures.push(d)
+        if (d) platform.push(d)
       }
+      // Per platform, because predictions are indexed per stop, and a station is several.
+      await annotateLearned('BA', stopId, platform)
+      departures.push(...platform)
     }
 
     const filtered = departures
@@ -182,6 +184,8 @@ export async function registerBartBoard(app: FastifyInstance): Promise<void> {
       vehicleAgeSeconds: stored?.ageSeconds ?? null,
       serverNowMs: Date.now(),
       departures: filtered,
+      /** How many of the departures shown the profile moved; drives the purple banner. */
+      corrected: filtered.filter((d) => d.correctedMs !== undefined).length,
       trains: trains.slice(0, 12),
     }
   }
@@ -241,7 +245,12 @@ const BART_STYLE = `
 .err { color:var(--warn); }
 code { font-family:var(--font-mono); background:#1a1e24; padding:1px 5px; border-radius:4px; }
 table { width:100%; }
-`
+/* A correction is a claim about data the agency did not give us, so the row is tinted
+   and edged rather than merely recoloured: it should be obviously ours at a glance. */
+tr.learned td { background:#8B6BF012; }
+tr.learned td:first-child { box-shadow:inset 3px 0 0 #8B6BF0; border-radius:8px 0 0 8px; }
+tr.learned td:last-child { border-radius:0 8px 8px 0; }
+` + LEARNED_STYLE
 
 function renderPage(data: Record<string, unknown>): string {
   const json = jsonLiteral(data)
@@ -252,6 +261,7 @@ function renderPage(data: Record<string, unknown>): string {
 
   const script = `const DATA = ${json};
 function pad(n){ return String(n).padStart(2,'0') }
+function clock(ms){ const t = new Date(ms); return pad(t.getHours())+':'+pad(t.getMinutes()) }
 // Floor, not round: BART calls the last 60 seconds "Leaving", and so do we.
 function countdown(ms){
   const s = Math.floor(ms/1000);
@@ -298,15 +308,26 @@ function render(){
   if (st.bad) h += '<div class="stale">⚠ '+st.msg+'</div>';
   if (DATA.lineUnknown) h += '<div class="sub err">Unknown line — showing all.</div>';
   if (DATA.directionIgnored) h += '<div class="sub err">BART runs north/south; direction ignored.</div>';
+  if (DATA.corrected > 0) h += '<div class="banner learned"><span class="pdot"></span>'
+    + '<span>We are using historical data to improve countdowns. '
+    + DATA.corrected + ' of ' + DATA.departures.length + ' adjusted. '
+    + '<a href="/how">How?</a></span></div>';
 
   h += '<table'+(st.bad?' class="doubt"':'')+'><tr><th>in</th><th>to</th><th>line</th><th>plat</th><th>cars</th></tr>';
   if (!DATA.departures.length) h += '<tr><td colspan="5" class="dim">No departures.</td></tr>';
   for (const d of DATA.departures.slice(0,10)){
-    const left = d.epochMs - now;
+    const learned = typeof d.correctedMs === 'number';
+    const left = (learned ? d.correctedMs : d.epochMs) - now;
     // Don't paint a stale countdown green as though it were live.
-    const cls = (left <= 0 && !st.bad) ? 'cd now' : 'cd';
-    h += '<tr><td class="'+cls+'">'+countdown(left)+'</td>'
-      + '<td>'+d.destination+(d.leaving?' <span class="dim">leaving</span>':'')+'</td>'
+    const cls = (left <= 0 && !st.bad) ? 'cd now' : (learned ? 'cd learned' : 'cd');
+    h += '<tr'+(learned?' class="learned"':'')+'><td class="'+cls+'">'+countdown(left)
+      + (learned ? '<span class="was">agency '+clock(d.epochMs)+'</span>' : '')+'</td>'
+      + '<td>'+d.destination+(d.leaving?' <span class="dim">leaving</span>':'')
+      + (learned ? '<span class="tag">adjusted</span>' : '')
+      + (learned && d.blockSeconds ? '<div class="dim">this train running '
+          + (d.blockSeconds < 0 ? Math.abs(d.blockSeconds)+'s early' : d.blockSeconds+'s late')
+          + ' today</div>' : '')
+      + '</td>'
       + '<td class="dim">'+d.line+'</td>'
       + '<td class="dim">'+(d.platform??'—')+'</td>'
       + '<td class="dim">'+(d.cars??'—')

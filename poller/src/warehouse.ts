@@ -770,6 +770,62 @@ export async function saveScores(
   }
 }
 
+/** One resolved spot check (see `accuracy.ts`). */
+export async function saveAccuracyCheck(c: {
+  agency: string
+  stopId: string
+  tripId: string
+  lineRef: string
+  madeAt: number
+  horizonS: number
+  rawError: number
+  modelError: number
+  inBand: boolean
+  samples: number
+  confidence: string
+}): Promise<void> {
+  await run(
+    `INSERT INTO accuracy_check
+       (agency, stop_id, trip_id, line_ref, made_at, horizon_s, raw_error, model_error,
+        in_band, samples, confidence)
+     VALUES ($1,$2,$3,$4,to_timestamp($5),$6,$7,$8,$9,$10,$11)`,
+    [c.agency, c.stopId, c.tripId, c.lineRef, c.madeAt, c.horizonS, c.rawError, c.modelError,
+     c.inBand, c.samples, c.confidence],
+  )
+}
+
+/**
+ * Today's spot checks, folded into the scoreboard, and checks past a month dropped.
+ *
+ * Horizon buckets are the upper edge in minutes (5, 10, 15, 20, 30), so the ten-minute
+ * question has a row of its own. Done in SQL so the checks never have to be held in memory.
+ */
+export async function rollUpAccuracy(): Promise<void> {
+  await run(
+    `INSERT INTO model_score
+       (day, agency, horizon, n, raw_mae, raw_median, corr_mae, corr_median, bias, coverage, win_rate)
+     SELECT checked_at::date, agency,
+            CASE WHEN horizon_s <= 300 THEN 5 WHEN horizon_s <= 600 THEN 10
+                 WHEN horizon_s <= 900 THEN 15 WHEN horizon_s <= 1200 THEN 20 ELSE 30 END AS h,
+            count(*),
+            avg(abs(raw_error)),
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(raw_error)),
+            avg(abs(model_error)),
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(model_error)),
+            avg(model_error),
+            avg(in_band::int),
+            avg((abs(model_error) < abs(raw_error))::int)
+       FROM accuracy_check
+      WHERE checked_at >= current_date
+      GROUP BY 1, 2, 3
+     ON CONFLICT (day, agency, horizon) DO UPDATE SET
+       n = EXCLUDED.n, raw_mae = EXCLUDED.raw_mae, raw_median = EXCLUDED.raw_median,
+       corr_mae = EXCLUDED.corr_mae, corr_median = EXCLUDED.corr_median,
+       bias = EXCLUDED.bias, coverage = EXCLUDED.coverage, win_rate = EXCLUDED.win_rate`,
+  )
+  await run(`DELETE FROM accuracy_check WHERE checked_at < now() - interval '30 days'`)
+}
+
 /** Recent scores, which is what the promotion gate reads. */
 export async function recentScores(days = 14): Promise<
   { agency: string; horizon: number; n: number; rawMedian: number; corrMedian: number; coverage: number }[]

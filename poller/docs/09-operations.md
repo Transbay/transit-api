@@ -169,9 +169,13 @@ Everything not listed in the README's `.env.example`:
 | `PROFILE_LEARN_INTERVAL` | `300` | Seconds between learner ticks |
 | `PROFILE_RETENTION_DAYS` | `90` | Days of raw observations kept |
 | `PROFILE_STREAM_MAXLEN` | `200000` | Observation stream cap |
+| `PROFILE_CACHE_ROUTES` | `32` | Route profiles kept unpacked for predictions, least recently used out. ~2 MB each |
 | `PREDICTION_MODE` | `shadow` | `off` / `shadow` / `on` |
 | `PREDICTION_MIN_SAMPLES` | `3` | Below this, a segment offers no correction |
-| `DEPARTURES_CORRECTED` | `false` | Apply confident corrections to `/v1/departures` itself, same envelope. Needs `PREDICTION_MODE=on` |
+| `DEPARTURES_CORRECTED` | `false` | Apply proven corrections to `/v1/departures` itself, same envelope, for clients that don't send `corrected=`. Needs `PREDICTION_MODE=on` |
+| `ACCURACY_SAMPLE_RATE` | `0.1` | Chance a computed stop's predictions contribute one spot check. `0` turns checks off |
+| `ACCURACY_MAX_PENDING` | `2000` | Spot checks waiting on their vehicle, at most (one Redis hash) |
+| `ACCURACY_MIN_CHECKS` | `50` | Spot checks per agency and horizon over 14 days before a correction counts as proven |
 | `DATABASE_URL` | — | Absent means no warehouse, which is supported |
 | `DATABASE_POOL_SIZE` | `4` | |
 | `DATABASE_MIGRATE` | `true` | Set false on a replica that must not race the leader |

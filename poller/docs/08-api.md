@@ -20,7 +20,7 @@ delay-profile work touches them.
 | `GET` | `/v1/lines` | `operator_id` | 24 h |
 | `GET` | `/v1/stops` | `operator_id` | 24 h |
 | `GET` | `/v1/patterns` | `operator_id`, `line_id` | 24 h |
-| `GET` | `/v1/departures` | `agency`, `stopcode` | snapshot (~15 s) |
+| `GET` | `/v1/departures` | `agency`, `stopcode`, optional `corrected` | snapshot (~15 s) |
 | `GET` | `/v1/vehicles` | `agency`, `line` | snapshot (~15 s) |
 
 `/v1/departures` returns the SIRI `StopMonitoring` envelope. Headers:
@@ -37,6 +37,25 @@ Three properties the client depends on, restated because breaking any of them is
   setting the board goes empty.
 - **Visits are already filtered to the requested stop.** The client does not check
   `MonitoringRef`.
+
+### Learned times in `/v1/departures`
+
+`corrected=1` applies proven corrections to this request; `corrected=0` never does. Without
+the parameter the response follows `DEPARTURES_CORRECTED`, so builds that predate it are
+unaffected. Proven means all three: what `/v1/predictions` would claim at the bridge's
+confidence floor, with at least `PREDICTION_MIN_SAMPLES` behind it, and spot checks for that
+agency and horizon showing our median miss beating the agency's over the last fortnight
+(`ACCURACY_MIN_CHECKS`, see `accuracy.ts` and `/v1/profile/scores`). So nothing moves until
+`PREDICTION_MODE=on` and the checks have accumulated.
+
+Only the `Expected*` times move, by the same amount, preserving dwell. A moved visit carries
+`MonitoredCall.Extensions`:
+
+```json
+{ "Adjusted": true, "AgencyExpectedDepartureTime": "2026-09-09T18:10:00Z" }
+```
+
+`x-corrected` reports how many visits moved.
 
 ## New: corrected predictions
 
